@@ -46,7 +46,7 @@ if you faced any problems with the touch or gamepad controls you can change the 
 
 
 ## Why RE:winmali ?
-You get all the winlator mali features with a new improve UI and new features 
+You get all the winlator mali features with a new improved UI and new features 
 
 Mali GPUs don't natively support the BCn texture formats (BC1–BC7) that PC games rely on, which caused black textures and missing models. Winlator Mali fixes this and more:
 
@@ -57,7 +57,7 @@ Real Mali telemetry HUD (GPU load, clocks, CPU, battery watts, frametimes)
 Touch controls, gyro, USB gamepads and rumble, plus a live in-game controls editor
 Community Configs with ratings, SteamGridDB artwork and a Save Manager
 
-Credits
+# Credits
 Winlator Mali: GunaCharanTeja (Fcharan)
 Winlator & Gladio: Bruno (brunodev85)
 Bionic fork: Pipetto Cripto
@@ -69,6 +69,7 @@ Community Configs idea: The412Banner
 Reference implementations: longjunyu2
 ZeroFG: hy300leosquizz-ctrl
 Touch controls styling: inspired by Madeira
-Licenses
+
+# Licenses
 Wine/Proton (LGPL v2.1+), Box64 (MIT), FEX-Emu (MIT), Mesa (MIT/LGPL), DXVK (zlib/libpng), VKD3D (LGPL v2.1), libadrenotools (GPL v3), ZeroFG (Apache 2.0 / BSD 3-Clause), Inter Font (SIL OFL 1.1), AOSP (Apache 2.0). 
   
