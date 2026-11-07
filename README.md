@@ -7,8 +7,12 @@ A fork of Winlator Mali
 
  ## New UI
 new horizontal and vertical UI 
- <img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/4b2626c6-ce37-4f86-b4ac-3177bc851350" />
-<img width="562" height="1280" alt="image" src="https://github.com/user-attachments/assets/65b81b58-f4bb-4ffb-af4a-24d6942f03a6" />
+<img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/629fce2a-5c5c-49ad-9550-cc199d8d0034" />
+<img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/4b2626c6-ce37-4f86-b4ac-3177bc851350" />
+
+<img width="281" height="640" alt="image" src="https://github.com/user-attachments/assets/65b81b58-f4bb-4ffb-af4a-24d6942f03a6" />
+<img width="281" height="640" alt="image" src="https://github.com/user-attachments/assets/2c985142-cba7-4d1b-9b88-85e31548162f" />
+<img width="281" height="640" alt="image" src="https://github.com/user-attachments/assets/7bb39318-7273-40af-8fa3-02f76a62869e" />
 
  
 new shortcuts app UI with costomizable icons and backgrounds,vertical mode has two scrolling modes, vertical and horizontal mode have different art
@@ -41,4 +45,30 @@ if you faced any problems with the touch or gamepad controls you can change the 
   from Bannerlator-3.1.8-mali-pre1
 
 
+## Why RE:winmali ?
+You get all the winlator mali features with a new improve UI and new features 
+
+Mali GPUs don't natively support the BCn texture formats (BC1–BC7) that PC games rely on, which caused black textures and missing models. Winlator Mali fixes this and more:
+
+BCn texture emulation to ASTC / ETC2, with a persistent disk cache to remove repeat stutter
+NFSR, SGSR, FXAA and other PostFX
+ZeroFG frame generation, a Vulkan compute engine tuned for Mali
+Real Mali telemetry HUD (GPU load, clocks, CPU, battery watts, frametimes)
+Touch controls, gyro, USB gamepads and rumble, plus a live in-game controls editor
+Community Configs with ratings, SteamGridDB artwork and a Save Manager
+
+Credits
+Winlator Mali: GunaCharanTeja (Fcharan)
+Winlator & Gladio: Bruno (brunodev85)
+Bionic fork: Pipetto Cripto
+BCn Vulkan layer: leegao
+HUD & File Manager: stevenmxz
+Controller fixes: vivsi1
+Theme system & CI: Noysz
+Community Configs idea: The412Banner
+Reference implementations: longjunyu2
+ZeroFG: hy300leosquizz-ctrl
+Touch controls styling: inspired by Madeira
+Licenses
+Wine/Proton (LGPL v2.1+), Box64 (MIT), FEX-Emu (MIT), Mesa (MIT/LGPL), DXVK (zlib/libpng), VKD3D (LGPL v2.1), libadrenotools (GPL v3), ZeroFG (Apache 2.0 / BSD 3-Clause), Inter Font (SIL OFL 1.1), AOSP (Apache 2.0). 
   
