@@ -10,9 +10,9 @@ new horizontal and vertical UI
 <img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/629fce2a-5c5c-49ad-9550-cc199d8d0034" />
 <img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/4b2626c6-ce37-4f86-b4ac-3177bc851350" />
 
-<img width="281" height="640" alt="image" src="https://github.com/user-attachments/assets/65b81b58-f4bb-4ffb-af4a-24d6942f03a6" />
-<img width="281" height="640" alt="image" src="https://github.com/user-attachments/assets/2c985142-cba7-4d1b-9b88-85e31548162f" />
-<img width="281" height="640" alt="image" src="https://github.com/user-attachments/assets/7bb39318-7273-40af-8fa3-02f76a62869e" />
+<img width="93" height="213" alt="image" src="https://github.com/user-attachments/assets/65b81b58-f4bb-4ffb-af4a-24d6942f03a6" />
+<img width="93" height="213" alt="image" src="https://github.com/user-attachments/assets/2c985142-cba7-4d1b-9b88-85e31548162f" />
+<img width="93" height="213" alt="image" src="https://github.com/user-attachments/assets/7bb39318-7273-40af-8fa3-02f76a62869e" />
 
  
 new shortcuts app UI with costomizable icons and backgrounds,vertical mode has two scrolling modes, vertical and horizontal mode have different art
