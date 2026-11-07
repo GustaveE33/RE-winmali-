@@ -24,11 +24,14 @@ import your drivers easily
 import any .tzst driver to same natively from the mange wrappers app
 <img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/ce8587e7-aee0-4b24-9866-c2a6a9fb0ba4" />
 
+### Change touch controls engine
+if you faced any problems with the touch or gamepad controls you can change the engine to the winlator mali 1.1 engine as a fallback
+
 ### New renderers 
   #### OpenGL+Gladio 
   from winlator mali 1.2 beta
 
-  ####EGL 
+  #### EGL 
   from latest winlator mali 1.2.1
 
   #### Vulkan 
@@ -36,3 +39,6 @@ import any .tzst driver to same natively from the mange wrappers app
 
  #### SurfaceFlinger 
   from Bannerlator-3.1.8-mali-pre1
+
+
+  
