@@ -25,7 +25,7 @@ import your drivers easily
 <img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/4a9d43d3-6c4c-441c-9c79-1e914e2f28bf" />
 
 ### Import wrapper option 
-import any .tzst driver to same natively from the mange wrappers app
+import any .tzst wrapper natively from the mange wrappers app
 <img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/ce8587e7-aee0-4b24-9866-c2a6a9fb0ba4" />
 
 ### Change touch controls engine
