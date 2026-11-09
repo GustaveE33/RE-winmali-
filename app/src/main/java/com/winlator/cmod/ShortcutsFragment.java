@@ -1,0 +1,1928 @@
+package com.winlator.cmod;
+
+import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.ShortcutInfo;
+import android.content.pm.ShortcutManager;
+import android.content.res.Configuration;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.Icon;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.view.LayoutInflater;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.ImageButton;
+import android.widget.ImageView;
+import android.util.TypedValue;
+import android.widget.PopupMenu;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.widget.TextViewCompat;
+import androidx.fragment.app.Fragment;
+import androidx.preference.PreferenceManager;
+import com.bumptech.glide.RequestBuilder;
+import com.bumptech.glide.load.resource.bitmap.CenterCrop;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.LinearSmoothScroller;
+import androidx.recyclerview.widget.LinearSnapHelper;
+import androidx.recyclerview.widget.RecyclerView;
+
+import com.bumptech.glide.Glide;
+import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions;
+import com.winlator.cmod.container.Container;
+import com.winlator.cmod.container.ContainerManager;
+import com.winlator.cmod.container.Shortcut;
+import com.winlator.cmod.contentdialog.ContentDialog;
+import com.winlator.cmod.contentdialog.ShortcutSettingsDialog;
+import com.winlator.cmod.core.AppUtils;
+import com.winlator.cmod.core.CommunityConfigManager;
+import com.winlator.cmod.core.CommunityConfigUtils;
+import com.winlator.cmod.core.CoverArtManager;
+import com.winlator.cmod.core.FileUtils;
+import com.winlator.cmod.core.ImageUtils;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import com.winlator.cmod.core.steamgrid.SteamGridDBApi;
+import com.winlator.cmod.core.steamgrid.SteamGridGameDetailsResponse;
+import com.winlator.cmod.core.steamgrid.SteamGridSearchResponse;
+
+public class ShortcutsFragment extends Fragment {
+    private ContainerManager manager;
+    private RecyclerView recyclerView;
+    private LinearSnapHelper shortcutSnapHelper;
+    private ImageView heroArt;
+    private ShortcutVignetteView vignetteView;
+    private TextView heroTitle;
+    private TextView heroSubtitle;
+    private Shortcut currentShortcut;
+    private ShortcutsAdapter adapter;
+    private int shortcutBlurStrength;
+    private int currentArtTarget;
+    private boolean startupEntranceScheduled;
+    private int startupEntranceRetries;
+    private final Set<String> automaticArtLookups = new HashSet<>();
+    private static final int REQUEST_CODE_CUSTOM_COVER_ART = 1;
+    private static final int REQUEST_CODE_IMPORT_SHORTCUT = 1002;
+    private static final int ART_TARGET_HORIZONTAL_GAME_ART = 0;
+    private static final int ART_TARGET_HORIZONTAL_GAME_BACKGROUND = 1;
+    private static final int ART_TARGET_VERTICAL_GAME_ART = 2;
+    private static final int ART_TARGET_VERTICAL_GAME_BACKGROUND = 3;
+
+    @Override
+    public void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setHasOptionsMenu(false);
+        if (getActivity() instanceof MainActivity) {
+            manager = ((MainActivity) getActivity()).getContainerManager();
+        } else {
+            manager = new ContainerManager(getContext());
+        }
+    }
+
+    @Nullable
+    @Override
+    public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup container, @Nullable Bundle savedInstanceState) {
+        return inflater.inflate(R.layout.shortcuts_fragment, container, false);
+    }
+
+    @Override
+    public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
+        super.onViewCreated(view, savedInstanceState);
+        ThemeManager.applyThemeToView(view, getContext());
+        androidx.appcompat.app.ActionBar actionBar = ((AppCompatActivity)getActivity()).getSupportActionBar();
+        if (actionBar != null) {
+            actionBar.setTitle("");
+        }
+
+        heroArt = view.findViewById(R.id.IVShortcutHeroArt);
+        vignetteView = view.findViewById(R.id.ShortcutVignette);
+        SharedPreferences uiPreferences = PreferenceManager.getDefaultSharedPreferences(requireContext());
+        int vignetteStrength = uiPreferences.getInt(SettingsFragment.PREF_SHORTCUT_VIGNETTE_STRENGTH, 30);
+        shortcutBlurStrength = uiPreferences.getInt(SettingsFragment.PREF_SHORTCUT_BLUR_STRENGTH, 0);
+        vignetteView.setStrength(vignetteStrength);
+        heroTitle = view.findViewById(R.id.TVShortcutHeroTitle);
+        heroSubtitle = view.findViewById(R.id.TVShortcutHeroSubtitle);
+        recyclerView = view.findViewById(R.id.RecyclerView);
+        ImageButton optionsButton = view.findViewById(R.id.IBShortcutOptions);
+        optionsButton.setFocusable(false);
+        optionsButton.setFocusableInTouchMode(false);
+        optionsButton.setOnClickListener(this::showShortcutOptionsMenu);
+        shortcutSnapHelper = new LinearSnapHelper();
+        updateCarouselLayout();
+        recyclerView.setItemAnimator(null);
+        recyclerView.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrolled(@NonNull RecyclerView recyclerView, int dx, int dy) {
+                updateShortcutCarouselDepth();
+            }
+
+            @Override
+            public void onScrollStateChanged(@NonNull RecyclerView recyclerView, int newState) {
+                if (newState != RecyclerView.SCROLL_STATE_IDLE) return;
+                if (shortcutSnapHelper == null) return;
+                View snapped = shortcutSnapHelper.findSnapView(recyclerView.getLayoutManager());
+                if (snapped == null || adapter == null) return;
+                int position = recyclerView.getChildAdapterPosition(snapped);
+                if (position != RecyclerView.NO_POSITION && position < adapter.data.size()) {
+                    Shortcut selectedShortcut = adapter.data.get(position);
+                    if (currentShortcut != selectedShortcut) {
+                        UiSoundEffects.playNavigation(requireContext());
+                    }
+                    showShortcutHero(selectedShortcut);
+                }
+            }
+        });
+
+        loadShortcutsList();
+    }
+
+    private void showShortcutOptionsMenu(View anchor) {
+        Context context = getContext();
+        if (context == null) return;
+
+        PopupMenu menu = new PopupMenu(context, anchor);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) menu.setForceShowIcon(true);
+        menu.inflate(R.menu.shortcuts_menu);
+
+        int accent = ThemeManager.getAccentColor(context);
+        for (int i = 0; i < menu.getMenu().size(); i++) {
+            MenuItem item = menu.getMenu().getItem(i);
+            if (item.getIcon() != null) {
+                Drawable icon = item.getIcon().mutate();
+                icon.setTint(accent);
+                item.setIcon(icon);
+            }
+        }
+
+        menu.setOnMenuItemClickListener(item -> {
+            int id = item.getItemId();
+            if (id == R.id.shortcuts_menu_search) {
+                ContentDialog.prompt(context, R.string.search, "", query -> {
+                    if (adapter != null) adapter.filter(query);
+                });
+            } else if (id == R.id.shortcuts_menu_import) {
+                importShortcutWorkflow();
+            } else if (id == R.id.shortcuts_menu_sort) {
+                showSortDialog();
+            } else if (id == R.id.shortcuts_menu_refresh) {
+                loadShortcutsList();
+            } else if (id == R.id.shortcuts_menu_fetch_missed_art) {
+                fetchMissedArt();
+            } else {
+                return false;
+            }
+            return true;
+        });
+        UiSoundEffects.showMenu(menu);
+    }
+
+    public boolean openSelectedShortcutMenu() {
+        if (recyclerView == null || adapter == null || currentShortcut == null) return false;
+        int position = adapter.data.indexOf(currentShortcut);
+        if (position == -1) return false;
+        RecyclerView.ViewHolder holder = recyclerView.findViewHolderForAdapterPosition(position);
+        if (holder == null) return false;
+        View anchor = holder.itemView.findViewById(R.id.BTMenu);
+        adapter.showListItemMenu(anchor != null ? anchor : holder.itemView, currentShortcut);
+        return true;
+    }
+
+    private void fetchMissedArt() {
+        Context context = getContext();
+        ShortcutsAdapter currentAdapter = adapter;
+        if (context == null || currentAdapter == null) return;
+        if (!AppUtils.isNetworkAvailable(context)) {
+            Toast.makeText(context, R.string.missed_art_network_unavailable, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        int missingCount = 0;
+        for (Shortcut shortcut : currentAdapter.originalData) {
+            if (hasExistingCustomArt(shortcut)) continue;
+            missingCount++;
+            CoverArtManager.fetchMissingArt(context, shortcut, () -> {
+                Activity activity = getActivity();
+                if (activity == null) return;
+                activity.runOnUiThread(() -> {
+                    if (!isAdded() || recyclerView == null || adapter == null) return;
+                    adapter.notifyDataSetChanged();
+                    if (currentShortcut == shortcut) showShortcutHero(shortcut);
+                });
+            });
+        }
+
+        String message = missingCount == 0
+                ? getString(R.string.no_shortcuts_missing_art)
+                : getString(R.string.fetching_missed_art, missingCount);
+        Toast.makeText(context, message, Toast.LENGTH_LONG).show();
+    }
+
+    private boolean hasExistingCustomArt(Shortcut shortcut) {
+        return hasExistingArtFile(shortcut.getCustomCoverArtPath())
+                || hasExistingArtFile(shortcut.getCustomHeroArtPath())
+                || hasExistingArtFile(shortcut.getCustomVerticalArtPath())
+                || hasExistingArtFile(shortcut.getCustomVerticalBackgroundArtPath());
+    }
+
+    private boolean hasExistingArtFile(String path) {
+        return path != null && !path.isEmpty() && new File(path).isFile();
+    }
+
+    private void showSortDialog() {
+        Context context = getContext();
+        if (context == null) return;
+        String[] sortOptions = {
+            "Name (A to Z)",
+            "Name (Z to A)",
+            "Most Played",
+            "Longest Playtime",
+            "Container Name"
+        };
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
+        ContentDialog.showSingleChoiceList(context, "Sort Shortcuts", sortOptions, (index) -> {
+            prefs.edit().putInt("shortcuts_sort_order", index).apply();
+            if (adapter != null) {
+                adapter.setSortOrder(index);
+            }
+        });
+    }
+
+    @Override
+    public void onConfigurationChanged(@NonNull Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        updateCarouselLayout();
+        if (recyclerView != null) {
+            recyclerView.getRecycledViewPool().clear();
+            if (recyclerView.getAdapter() != null) {
+                recyclerView.getAdapter().notifyDataSetChanged();
+            }
+            if (currentShortcut != null) showShortcutHero(currentShortcut);
+        }
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        com.winlator.cmod.container.Shortcut.setOnShortcutLoadedListener(null);
+    }
+
+    private void updateCarouselLayout() {
+        if (recyclerView == null) return;
+        float density = getResources().getDisplayMetrics().density;
+        boolean verticalScroll = shouldScrollVertically();
+        int sidePadding = Math.round(18 * density);
+
+        recyclerView.setPadding(sidePadding, 0, sidePadding, 0);
+        recyclerView.setClipToPadding(false);
+        recyclerView.setClipChildren(false);
+        RecyclerView.LayoutManager lm = recyclerView.getLayoutManager();
+        int orientation = verticalScroll ? RecyclerView.VERTICAL : RecyclerView.HORIZONTAL;
+        if (!(lm instanceof LinearLayoutManager)
+                || ((LinearLayoutManager) lm).getOrientation() != orientation) {
+            recyclerView.setLayoutManager(new LinearLayoutManager(requireContext(), orientation, false));
+        }
+        if (shortcutSnapHelper != null) shortcutSnapHelper.attachToRecyclerView(recyclerView);
+
+        recyclerView.invalidateItemDecorations();
+        recyclerView.post(() -> {
+            if (recyclerView == null || !isAdded()) return;
+            float measuredDensity = getResources().getDisplayMetrics().density;
+            if (verticalScroll) {
+                int edgePadding = Math.max(0,
+                        (recyclerView.getHeight() - Math.round(192 * measuredDensity)) / 2);
+                recyclerView.setPadding(sidePadding, edgePadding, sidePadding, edgePadding);
+            } else {
+                boolean portrait = isPortraitUi();
+                int cardWidth = Math.round((portrait ? 132 : 156) * measuredDensity);
+                int edgePadding = Math.max(Math.round(24 * measuredDensity),
+                        (recyclerView.getWidth() - cardWidth) / 2);
+                int cardHeight = Math.round((portrait ? 192 : 196) * measuredDensity);
+                int verticalPadding = Math.max(0, (recyclerView.getHeight() - cardHeight) / 2);
+                recyclerView.setPadding(edgePadding, verticalPadding, edgePadding, verticalPadding);
+            }
+        });
+    }
+
+    private void updateShortcutCarouselDepth() {
+        if (recyclerView == null) return;
+        boolean verticalScroll = shouldScrollVertically();
+        float center = verticalScroll ? recyclerView.getHeight() / 2f : recyclerView.getWidth() / 2f;
+        float density = getResources().getDisplayMetrics().density;
+        for (int i = 0; i < recyclerView.getChildCount(); i++) {
+            View card = recyclerView.getChildAt(i);
+            float cardCenter = verticalScroll
+                    ? (card.getTop() + card.getBottom()) / 2f
+                    : (card.getLeft() + card.getRight()) / 2f;
+            float dimension = Math.max(1, verticalScroll ? card.getHeight() : card.getWidth());
+            float distance = Math.min(1f, Math.abs(center - cardCenter) / (dimension * 1.25f));
+            float scale = verticalScroll ? 1.1f - (0.28f * distance) : 1.2f - (0.42f * distance);
+            card.setPivotX(card.getWidth() / 2f);
+            card.setPivotY(card.getHeight() / 2f);
+            card.setScaleX(scale);
+            card.setScaleY(scale);
+            card.setAlpha(verticalScroll ? 1f - (0.32f * distance) : 1f - (0.42f * distance));
+            card.setTranslationX(verticalScroll ? 2f * density * distance : 0f);
+            card.setTranslationY(verticalScroll ? 0f : 3f * density * distance);
+            card.setElevation((verticalScroll ? 12f : 10f) * density * (1f - distance));
+            card.setSelected(distance < 0.08f);
+        }
+    }
+
+    private boolean isPortraitUi() {
+        return getResources().getConfiguration().orientation == Configuration.ORIENTATION_PORTRAIT;
+    }
+
+    private boolean shouldScrollVertically() {
+        return isPortraitUi() && PreferenceManager.getDefaultSharedPreferences(requireContext())
+                .getBoolean(SettingsFragment.PREF_SHORTCUT_VERTICAL_SCROLL, false);
+    }
+
+    private final java.util.concurrent.ExecutorService shortcutLoaderExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
+
+    public void loadShortcutsList() {
+        com.winlator.cmod.container.Shortcut.setOnShortcutLoadedListener(shortcut -> {
+            if (getActivity() != null && recyclerView != null) {
+                getActivity().runOnUiThread(() -> {
+                    if (adapter != null && adapter.data != null) {
+                        for (int i = 0; i < adapter.data.size(); i++) {
+                            Shortcut s = adapter.data.get(i);
+                            if (s != null && s.file != null && s.file.equals(shortcut.file)) {
+                                adapter.notifyItemChanged(i);
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        shortcutLoaderExecutor.execute(() -> {
+            ArrayList<Shortcut> shortcuts = manager.loadShortcuts();
+            if (getActivity() != null) {
+                getActivity().runOnUiThread(() -> {
+                    if (recyclerView != null) {
+                        adapter = new ShortcutsAdapter(shortcuts);
+                        recyclerView.setAdapter(adapter);
+                        showShortcutHero(adapter.data.isEmpty() ? null : adapter.data.get(0));
+                        adapter.updateEmptyState();
+                        selectInitialShortcut();
+                        if (!startupEntranceScheduled && getActivity() instanceof MainActivity) {
+                            startupEntranceScheduled = ((MainActivity) getActivity())
+                                    .scheduleStartupHomeEntrance(this::animateShortcutsEntrance);
+                        }
+                        if (!startupEntranceScheduled) recyclerView.post(this::animateShortcutsEntrance);
+                    }
+                });
+            }
+        });
+    }
+
+    private void selectInitialShortcut() {
+        if (recyclerView == null || adapter == null || adapter.data.isEmpty()) return;
+        ShortcutsAdapter loadedAdapter = adapter;
+        recyclerView.post(() -> {
+            if (recyclerView == null || !isAdded() || adapter != loadedAdapter || loadedAdapter.data.isEmpty()) return;
+            RecyclerView.LayoutManager layoutManager = recyclerView.getLayoutManager();
+            if (layoutManager instanceof LinearLayoutManager) {
+                boolean verticalScroll = shouldScrollVertically();
+                int currentStartPadding = verticalScroll
+                        ? recyclerView.getPaddingTop() : recyclerView.getPaddingLeft();
+                int leadingOffset = Math.round(dp(18)) - currentStartPadding;
+                ((LinearLayoutManager) layoutManager).scrollToPositionWithOffset(0, leadingOffset);
+            } else {
+                recyclerView.scrollToPosition(0);
+            }
+            updateShortcutCarouselDepth();
+            showShortcutHero(loadedAdapter.data.get(0));
+        });
+    }
+
+    private void smoothScrollToShortcutPosition(int position) {
+        if (recyclerView == null || !(recyclerView.getLayoutManager() instanceof LinearLayoutManager)) return;
+        LinearSmoothScroller scroller = new LinearSmoothScroller(requireContext()) {
+            @Override
+            protected float calculateSpeedPerPixel(android.util.DisplayMetrics displayMetrics) {
+                return 110f / displayMetrics.densityDpi;
+            }
+
+            @Override
+            protected int getHorizontalSnapPreference() {
+                return SNAP_TO_ANY;
+            }
+
+            @Override
+            protected int getVerticalSnapPreference() {
+                return SNAP_TO_ANY;
+            }
+
+            @Override
+            public int calculateDtToFit(int viewStart, int viewEnd, int boxStart, int boxEnd, int snapPreference) {
+                return (boxStart + boxEnd) / 2 - (viewStart + viewEnd) / 2;
+            }
+        };
+        scroller.setTargetPosition(position);
+        ((LinearLayoutManager) recyclerView.getLayoutManager()).startSmoothScroll(scroller);
+    }
+
+    private void showShortcutHero(@Nullable Shortcut shortcut) {
+        if (shortcut == null || heroArt == null || heroTitle == null || heroSubtitle == null || !isAdded()) return;
+        currentShortcut = shortcut;
+        String containerName = shortcut.container != null ? shortcut.container.getName() : "";
+        heroTitle.animate().cancel();
+        heroSubtitle.animate().cancel();
+        heroTitle.animate().alpha(0f).setDuration(100).withEndAction(() -> {
+            if (heroTitle == null || !isAdded()) return;
+            heroTitle.setText(shortcut.name);
+            heroTitle.animate().alpha(1f).setDuration(200).start();
+        }).start();
+        heroSubtitle.animate().alpha(0f).setDuration(100).withEndAction(() -> {
+            if (heroSubtitle == null || !isAdded()) return;
+            heroSubtitle.setText(containerName);
+            heroSubtitle.animate().alpha(1f).setDuration(200).start();
+        }).start();
+
+        heroArt.animate().cancel();
+        boolean vertical = isPortraitUi();
+        String artPath = shortcut.getShortcutBackgroundArtPath(vertical);
+        File cachedArt = artPath != null && !artPath.isEmpty() ? new File(artPath) : null;
+        if (cachedArt != null && cachedArt.isFile()) {
+            loadHeroArt(cachedArt);
+        } else {
+            loadHeroArt(shortcut.getShortcutBackgroundArt(vertical));
+        }
+        updateShortcutCarouselDepth();
+    }
+
+    private void loadHeroArt(Object model) {
+        boolean vertical = isPortraitUi();
+        int targetWidth = vertical ? 600 : 960;
+        int targetHeight = vertical ? 900 : 540;
+        RequestBuilder<Drawable> request = Glide.with(this)
+                .load(model)
+                .transition(DrawableTransitionOptions.withCrossFade(240));
+        if (shortcutBlurStrength > 0) {
+            request.override(targetWidth, targetHeight)
+                    .transform(new CenterCrop(), new ShortcutBlurTransformation(shortcutBlurStrength))
+                    .thumbnail(Glide.with(this).load(model).centerCrop().override(targetWidth, targetHeight));
+        } else {
+            request.centerCrop();
+        }
+        request.into(heroArt);
+    }
+
+    private void animateShortcutsEntrance() {
+        if (recyclerView == null || !isAdded()) return;
+        if (getActivity() instanceof MainActivity
+                && !((MainActivity) getActivity()).isStartupAnimationEnabled()) return;
+        recyclerView.post(() -> {
+            if (recyclerView == null || !isAdded()) return;
+            if ((recyclerView.getAdapter() == null
+                    || (recyclerView.getAdapter().getItemCount() > 0 && recyclerView.getChildCount() == 0))
+                    && startupEntranceRetries < 40) {
+                startupEntranceRetries++;
+                recyclerView.postDelayed(this::animateShortcutsEntrance, 50L);
+                return;
+            }
+            for (int i = 0; i < recyclerView.getChildCount(); i++) {
+                View card = recyclerView.getChildAt(i);
+                card.animate().cancel();
+                card.setAlpha(0f);
+                boolean portraitUi = isPortraitUi();
+                card.setTranslationY(dp(portraitUi ? 20 : 72));
+                card.animate()
+                        .alpha(1f)
+                        .translationY(0f)
+                        .setStartDelay(portraitUi ? i * 42L : i * 65L)
+                        .setDuration(portraitUi ? 300L : 360L)
+                        .start();
+            }
+        });
+    }
+
+    private float dp(float value) {
+        return TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP,
+                value,
+                getResources().getDisplayMetrics());
+    }
+
+    private void requestAutomaticArtwork(Shortcut shortcut) {
+        Context context = getContext();
+        if (context == null || !AppUtils.isNetworkAvailable(context)) return;
+
+        String lookupKey = shortcut.file.getAbsolutePath();
+        if (!automaticArtLookups.add(lookupKey)) return;
+
+        CoverArtManager.fetchAutomaticArt(context, shortcut, () -> {
+            Activity activity = getActivity();
+            if (activity == null) return;
+            activity.runOnUiThread(() -> {
+                if (!isAdded() || recyclerView == null || adapter == null) return;
+                adapter.notifyDataSetChanged();
+                if (currentShortcut == shortcut) showShortcutHero(shortcut);
+            });
+        });
+    }
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_CODE_CUSTOM_COVER_ART && resultCode == Activity.RESULT_OK && data != null && currentShortcut != null) {
+            Uri selectedImage = data.getData();
+            try {
+                if (selectedImage == null) throw new IOException("No image was selected.");
+                android.graphics.Bitmap bitmap;
+                try (InputStream input = requireContext().getContentResolver().openInputStream(selectedImage)) {
+                    if (input == null) throw new IOException("Could not read the selected image.");
+                    bitmap = android.graphics.BitmapFactory.decodeStream(input);
+                }
+                if (bitmap == null) throw new IOException("The selected file is not a readable image.");
+                boolean vertical = isVerticalArtTarget(currentArtTarget);
+                boolean background = isBackgroundArtTarget(currentArtTarget);
+                if (!currentShortcut.saveShortcutArt(bitmap, vertical, background)) {
+                    throw new IOException("Could not save artwork for this shortcut.");
+                }
+                if (adapter != null) adapter.notifyDataSetChanged();
+                showShortcutHero(currentShortcut);
+                Toast.makeText(getContext(), "Game art updated.", Toast.LENGTH_SHORT).show();
+            } catch (Exception e) {
+                android.util.Log.e("ShortcutsFragment", "Failed to save selected game art", e);
+                Toast.makeText(getContext(), "Failed to update game art.", Toast.LENGTH_SHORT).show();
+            }
+        } else if (requestCode == REQUEST_CODE_IMPORT_SHORTCUT && resultCode == Activity.RESULT_OK && data != null) {
+            Uri uri = data.getData();
+            if (uri != null) {
+                handleImportedFile(uri);
+            }
+        }
+    }
+
+    private void importShortcutWorkflow() {
+        final Context context = getContext();
+        if (context == null) return;
+
+        final ArrayList<Container> containers = new ArrayList<>(manager.getContainers());
+        if (containers.isEmpty()) {
+            ContentDialog.alert(context, "No containers available. Please create a container first.", null);
+            return;
+        }
+
+        File exportDir = new File(com.winlator.cmod.SettingsFragment.DEFAULT_SHORTCUT_EXPORT_PATH);
+        final File[] files = exportDir.exists() ? exportDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".desktop")) : null;
+
+        if (files != null && files.length > 0) {
+            String[] options = new String[files.length + 1];
+            for (int i = 0; i < files.length; i++) {
+                options[i] = files[i].getName().replace(".desktop", "");
+            }
+            options[files.length] = "📁 Browse from Storage...";
+
+            ContentDialog.showSingleChoiceList(context, "Select Shortcut to Import", options, index -> {
+                if (index < files.length) {
+                    copyDesktopFileToContainer(files[index], containers);
+                } else {
+                    browseAndImportShortcut();
+                }
+            });
+        } else {
+            browseAndImportShortcut();
+        }
+    }
+
+    private void browseAndImportShortcut() {
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.setType("*/*");
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        try {
+            startActivityForResult(Intent.createChooser(intent, "Select .desktop shortcut file"), REQUEST_CODE_IMPORT_SHORTCUT);
+        } catch (Exception e) {
+            Toast.makeText(getContext(), "No file browser found.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void handleImportedFile(Uri uri) {
+        final Context context = getContext();
+        if (context == null || uri == null) return;
+        final ArrayList<Container> containers = new ArrayList<>(manager.getContainers());
+        if (containers.isEmpty()) return;
+
+        try {
+            String fileName = "imported_shortcut.desktop";
+            android.database.Cursor cursor = context.getContentResolver().query(uri, null, null, null, null);
+            if (cursor != null) {
+                if (cursor.moveToFirst()) {
+                    int nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                    if (nameIndex >= 0) {
+                        fileName = cursor.getString(nameIndex);
+                    }
+                }
+                cursor.close();
+            }
+            if (!fileName.endsWith(".desktop")) fileName = fileName + ".desktop";
+
+            File tempFile = new File(context.getCacheDir(), fileName);
+            java.io.InputStream in = context.getContentResolver().openInputStream(uri);
+            java.io.FileOutputStream out = new java.io.FileOutputStream(tempFile);
+            byte[] buf = new byte[4096];
+            int len;
+            while ((len = in.read(buf)) > 0) {
+                out.write(buf, 0, len);
+            }
+            in.close();
+            out.close();
+
+            copyDesktopFileToContainer(tempFile, containers);
+        } catch (Exception e) {
+            Toast.makeText(context, "Failed to read shortcut file: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void copyDesktopFileToContainer(File sourceFile, ArrayList<Container> containers) {
+        final Context context = getContext();
+        if (context == null || sourceFile == null || !sourceFile.exists()) return;
+
+        if (containers.size() == 1) {
+            doCopyDesktop(sourceFile, containers.get(0));
+        } else {
+            String[] containerNames = new String[containers.size()];
+            for (int i = 0; i < containers.size(); i++) {
+                containerNames[i] = containers.get(i).getName();
+            }
+            ContentDialog.showSingleChoiceList(context, "Target Container", containerNames, index -> {
+                doCopyDesktop(sourceFile, containers.get(index));
+            });
+        }
+    }
+
+    private void doCopyDesktop(File sourceFile, Container targetContainer) {
+        final Context context = getContext();
+        if (context == null || targetContainer == null) return;
+
+        File targetDir = targetContainer.getDesktopDir();
+        if (!targetDir.exists()) targetDir.mkdirs();
+
+        File targetFile = new File(targetDir, sourceFile.getName());
+        if (FileUtils.copy(sourceFile, targetFile)) {
+            Toast.makeText(context, "Shortcut '" + sourceFile.getName().replace(".desktop", "") + "' imported into " + targetContainer.getName(), Toast.LENGTH_LONG).show();
+            loadShortcutsList();
+        } else {
+            Toast.makeText(context, "Failed to import shortcut into container.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private class ShortcutsAdapter extends RecyclerView.Adapter<ShortcutsAdapter.ViewHolder> {
+        final List<Shortcut> originalData;
+        final List<Shortcut> data;
+        private String currentQuery = "";
+        private int currentSortOrder = 0;
+
+        public ShortcutsAdapter(List<Shortcut> shortcuts) {
+            this.originalData = new ArrayList<>(shortcuts);
+            this.data = new ArrayList<>();
+            Context ctx = getContext();
+            if (ctx != null) {
+                this.currentSortOrder = PreferenceManager.getDefaultSharedPreferences(ctx).getInt("shortcuts_sort_order", 0);
+            }
+            applyFilterAndSort();
+        }
+
+        public void filter(String query) {
+            this.currentQuery = query != null ? query.trim().toLowerCase() : "";
+            applyFilterAndSort();
+            notifyDataSetChanged();
+            if (recyclerView != null) recyclerView.scrollToPosition(0);
+            updateEmptyState();
+        }
+
+        public void setSortOrder(int sortOrder) {
+            this.currentSortOrder = sortOrder;
+            applyFilterAndSort();
+            notifyDataSetChanged();
+            if (recyclerView != null) recyclerView.scrollToPosition(0);
+            updateEmptyState();
+        }
+
+        private void applyFilterAndSort() {
+            data.clear();
+            for (Shortcut s : originalData) {
+                if (s == null) continue;
+                if (currentQuery.isEmpty()) {
+                    data.add(s);
+                } else {
+                    String name = s.name != null ? s.name.toLowerCase() : "";
+                    String containerName = (s.container != null && s.container.getName() != null) ? s.container.getName().toLowerCase() : "";
+                    String exe = s.getExecutable() != null ? s.getExecutable().toLowerCase() : "";
+                    if (name.contains(currentQuery) || containerName.contains(currentQuery) || exe.contains(currentQuery)) {
+                        data.add(s);
+                    }
+                }
+            }
+
+            Context ctx = getContext();
+            SharedPreferences pt = ctx != null ? ctx.getSharedPreferences("playtime_stats", Context.MODE_PRIVATE) : null;
+
+            switch (currentSortOrder) {
+                case 1: // Z to A
+                    data.sort((a, b) -> b.name.compareToIgnoreCase(a.name));
+                    break;
+                case 2: // Most Played
+                    if (pt != null) {
+                        data.sort((a, b) -> {
+                            int countA = pt.getInt(a.name + "_play_count", 0);
+                            int countB = pt.getInt(b.name + "_play_count", 0);
+                            if (countB != countA) return Integer.compare(countB, countA);
+                            return a.name.compareToIgnoreCase(b.name);
+                        });
+                    } else {
+                        data.sort((a, b) -> a.name.compareToIgnoreCase(b.name));
+                    }
+                    break;
+                case 3: // Longest Playtime
+                    if (pt != null) {
+                        data.sort((a, b) -> {
+                            long timeA = pt.getLong(a.name + "_playtime", 0L);
+                            long timeB = pt.getLong(b.name + "_playtime", 0L);
+                            if (timeB != timeA) return Long.compare(timeB, timeA);
+                            return a.name.compareToIgnoreCase(b.name);
+                        });
+                    } else {
+                        data.sort((a, b) -> a.name.compareToIgnoreCase(b.name));
+                    }
+                    break;
+                case 4: // By Container
+                    data.sort((a, b) -> {
+                        String cA = a.container != null ? a.container.getName() : "";
+                        String cB = b.container != null ? b.container.getName() : "";
+                        int cmp = cA.compareToIgnoreCase(cB);
+                        if (cmp != 0) return cmp;
+                        return a.name.compareToIgnoreCase(b.name);
+                    });
+                    break;
+                case 0: // A to Z (Default)
+                default:
+                    data.sort((a, b) -> a.name.compareToIgnoreCase(b.name));
+                    break;
+            }
+        }
+
+        public void updateEmptyState() {
+            View view = getView();
+            if (view == null) return;
+            if (!data.isEmpty()) showShortcutHero(data.get(0));
+            View emptyView = view.findViewById(R.id.TVEmptyText);
+            if (emptyView instanceof TextView) {
+                TextView tv = (TextView) emptyView;
+                if (originalData.isEmpty()) {
+                    tv.setText(R.string.no_items_to_display);
+                    tv.setVisibility(View.VISIBLE);
+                } else if (data.isEmpty()) {
+                    tv.setText("No matching shortcuts found");
+                    tv.setVisibility(View.VISIBLE);
+                } else {
+                    tv.setVisibility(View.GONE);
+                }
+            }
+        }
+
+        @NonNull
+        @Override
+        public ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+            return new ViewHolder(LayoutInflater.from(parent.getContext()).inflate(R.layout.shortcut_list_item, parent, false));
+        }
+
+        @Override
+        public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
+            Shortcut item = data.get(position);
+            holder.title.setText(item.name);
+            requestAutomaticArtwork(item);
+
+            boolean portraitUi = isPortraitUi();
+            RecyclerView.LayoutParams layoutParams = (RecyclerView.LayoutParams) holder.itemView.getLayoutParams();
+            if (portraitUi) {
+                int recyclerWidth = recyclerView.getWidth() > 0
+                        ? recyclerView.getWidth()
+                        : getResources().getDisplayMetrics().widthPixels;
+                int contentWidth = Math.max(0, recyclerWidth
+                        - recyclerView.getPaddingLeft() - recyclerView.getPaddingRight());
+                int cardWidth = Math.min(Math.round(dp(120)), contentWidth - Math.round(dp(24)));
+                layoutParams.width = Math.max(0, cardWidth);
+                layoutParams.height = Math.round(dp(180));
+                int horizontalMargin = Math.max(0, (contentWidth - cardWidth) / 2);
+                layoutParams.setMarginStart(horizontalMargin);
+                layoutParams.setMarginEnd(horizontalMargin);
+                layoutParams.topMargin = Math.round(dp(6));
+                layoutParams.bottomMargin = Math.round(dp(6));
+            } else {
+                layoutParams.width = Math.round(dp(144));
+                layoutParams.height = Math.round(dp(184));
+                layoutParams.setMarginStart(Math.round(dp(6)));
+                layoutParams.setMarginEnd(Math.round(dp(6)));
+            }
+            holder.itemView.setLayoutParams(layoutParams);
+            if (getActivity() instanceof MainActivity) {
+                MainActivity activity = (MainActivity) getActivity();
+                if (activity.isStartupLoadingVisible() && activity.isStartupAnimationEnabled()) {
+                    holder.itemView.setAlpha(0f);
+                    holder.itemView.setTranslationY(dp(72));
+                } else {
+                    holder.itemView.setAlpha(1f);
+                    holder.itemView.setTranslationY(0f);
+                }
+            }
+            float titleSize = portraitUi ? 12.0f : 12.5f;
+
+            if (holder.title != null) {
+                holder.title.setTextSize(TypedValue.COMPLEX_UNIT_SP, titleSize);
+            }
+
+            boolean verticalMode = isPortraitUi();
+            String artPath = item.getShortcutArtPath(verticalMode);
+            File cachedArt = artPath != null && !artPath.isEmpty() ? new File(artPath) : null;
+            if (cachedArt != null && cachedArt.isFile()) {
+                Glide.with(holder.coverArt)
+                    .load(cachedArt)
+                    .centerCrop()
+                    .into(holder.coverArt);
+            } else {
+                Glide.with(holder.coverArt)
+                    .load(item.getShortcutArt(verticalMode))
+                    .centerCrop()
+                    .into(holder.coverArt);
+            }
+
+            holder.menuButton.setOnClickListener((v) -> showListItemMenu(v, item));
+            holder.innerArea.setOnClickListener((v) -> {
+                showShortcutHero(item);
+                UiSoundEffects.playMenuClosed();
+                runFromShortcut(item);
+            });
+            holder.innerArea.setOnLongClickListener((v) -> {
+                showListItemMenu(holder.menuButton, item);
+                return true;
+            });
+            holder.itemView.setScaleX(1f);
+            holder.itemView.setScaleY(1f);
+            holder.innerArea.setOnFocusChangeListener((focusedView, hasFocus) -> {
+                if (hasFocus) {
+                    int adapterPosition = holder.getBindingAdapterPosition();
+                    if (adapterPosition != RecyclerView.NO_POSITION) {
+                        boolean changed = currentShortcut != item;
+                        smoothScrollToShortcutPosition(adapterPosition);
+                        if (changed) UiSoundEffects.playNavigation(requireContext());
+                    }
+                    showShortcutHero(item);
+                }
+            });
+        }
+
+        @Override
+        public void onViewAttachedToWindow(@NonNull ViewHolder holder) {
+            super.onViewAttachedToWindow(holder);
+            updateShortcutCarouselDepth();
+        }
+
+        @Override
+        public int getItemCount() {
+            return data.size();
+        }
+
+        private void showListItemMenu(View anchorView, final Shortcut shortcut) {
+            final Context context = getContext();
+            PopupMenu listItemMenu = new PopupMenu(context, anchorView);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) listItemMenu.setForceShowIcon(true);
+
+            listItemMenu.inflate(R.menu.shortcut_popup_menu);
+
+            Menu menu = listItemMenu.getMenu();
+            int accent = ThemeManager.getAccentColor(context);
+            for (int i = 0; i < menu.size(); i++) {
+                MenuItem item = menu.getItem(i);
+                if (item.getIcon() != null) {
+                    Drawable icon = item.getIcon().mutate();
+                    icon.setTint(accent);
+                    item.setIcon(icon);
+                }
+            }
+
+            listItemMenu.setOnMenuItemClickListener((menuItem) -> {
+                int itemId = menuItem.getItemId();
+                if (itemId == R.id.shortcut_settings) {
+                    (new ShortcutSettingsDialog(ShortcutsFragment.this, shortcut)).show();
+                }
+                else if (itemId == R.id.shortcut_remove) {
+                    ContentDialog.confirm(context, R.string.do_you_want_to_remove_this_shortcut, () -> {
+                        if (shortcut.file.delete()) {
+                            File lnkFile = new File(shortcut.file.getPath().substring(0, shortcut.file.getPath().lastIndexOf(".")) + ".lnk");
+                            if (lnkFile.exists()) lnkFile.delete();
+                            disableShortcutOnScreen(requireContext(), shortcut);
+                            loadShortcutsList();
+                            Toast.makeText(context, "Shortcut removed successfully.", Toast.LENGTH_SHORT).show();
+                        } else {
+                            Toast.makeText(context, "Failed to remove the shortcut.", Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }
+                else if (itemId == R.id.shortcut_clone_to_container) {
+                    showContainerSelectionDialog(new ArrayList<>(manager.getContainers()), (selectedContainer) -> {
+                        if (shortcut.cloneToContainer(selectedContainer)) {
+                            Toast.makeText(context, "Shortcut cloned successfully.", Toast.LENGTH_SHORT).show();
+                            loadShortcutsList();
+                        } else {
+                            Toast.makeText(context, "Failed to clone shortcut.", Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }
+                else if (itemId == R.id.shortcut_view_logs) {
+                    getParentFragmentManager().beginTransaction()
+                            .setCustomAnimations(R.anim.slide_in_up, R.anim.slide_out_down, R.anim.slide_in_down, R.anim.slide_out_up)
+                            .addToBackStack(null)
+                            .replace(R.id.FLFragmentContainer, LogManagerFragment.forGame(shortcut.name))
+                            .commit();
+                }
+                else if (itemId == R.id.shortcut_save_manager) {
+                    new com.winlator.cmod.saves.SaveManagerDialog(getActivity(), shortcut).show();
+                }
+                else if (itemId == R.id.shortcut_add_to_home_screen) {
+                    shortcut.genUUID();
+                    addShortcutToScreen(shortcut);
+                }
+                else if (itemId == R.id.shortcut_export) {
+                    exportShortcut(shortcut);
+                }
+                else if (itemId == R.id.shortcut_share_community) {
+                    shareShortcutToCommunity(shortcut);
+                }
+                else if (itemId == R.id.shortcut_properties) {
+                    showShortcutProperties(shortcut);
+                }
+                else if (itemId == R.id.shortcut_manage_cover_art) showArtTargetMenu(shortcut);
+                return true;
+            });
+
+            UiSoundEffects.showMenu(listItemMenu);
+        }
+
+        private void showArtTargetMenu(Shortcut shortcut) {
+            String[] targets = {
+                    getString(R.string.horizontal_game_art),
+                    getString(R.string.horizontal_game_background),
+                    getString(R.string.vertical_game_art),
+                    getString(R.string.vertical_game_background)
+            };
+            ContentDialog.showSingleChoiceList(getContext(), R.string.manage_art, targets,
+                    index -> showArtActions(shortcut, index));
+        }
+
+        private void showArtActions(Shortcut shortcut, int artTarget) {
+            Context context = getContext();
+            if (context == null) return;
+            String[] actions = {
+                    getString(R.string.search_game_art),
+                    getString(R.string.change_game_art),
+                    getString(R.string.reset_game_art)
+            };
+            ContentDialog.showSingleChoiceList(context, R.string.manage_art, actions, index -> {
+                if (index == 0) {
+                    showArtSelectionDialog(shortcut, artTarget);
+                } else if (index == 1) {
+                    currentShortcut = shortcut;
+                    currentArtTarget = artTarget;
+                    Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                    intent.setType("image/*");
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    startActivityForResult(Intent.createChooser(intent, getString(R.string.change_game_art)),
+                            REQUEST_CODE_CUSTOM_COVER_ART);
+                } else if (index == 2) {
+                    shortcut.resetShortcutArt(isVerticalArtTarget(artTarget), isBackgroundArtTarget(artTarget));
+                    if (currentShortcut == shortcut) showShortcutHero(shortcut);
+                    if (adapter != null) adapter.notifyDataSetChanged();
+                    Toast.makeText(context, "Artwork reset to the local game art.", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+
+        private void showContainerSelectionDialog(ArrayList<Container> containers, OnContainerSelectedListener listener) {
+            String[] containerNames = new String[containers.size()];
+            for (int i = 0; i < containers.size(); i++) containerNames[i] = containers.get(i).getName();
+            ContentDialog.showSingleChoiceList(getContext(), R.string.containers, containerNames, (index) -> {
+                listener.onContainerSelected(containers.get(index));
+            });
+        }
+
+        private void runFromShortcut(Shortcut shortcut) {
+            if (getActivity() instanceof MainActivity) {
+                ((MainActivity) getActivity()).preserveShortcutsOnGameReturn();
+            }
+            Intent intent = new Intent(getContext(), XServerDisplayActivity.class);
+            intent.putExtra("container_id", shortcut.container.id);
+            intent.putExtra("shortcut_path", shortcut.file.getPath());
+            intent.putExtra("shortcut_name", shortcut.name);
+            getContext().startActivity(intent);
+        }
+
+        private void exportShortcut(Shortcut shortcut) {
+            File exportDir = new File(com.winlator.cmod.SettingsFragment.DEFAULT_SHORTCUT_EXPORT_PATH);
+            if (!exportDir.exists()) exportDir.mkdirs();
+            File exportFile = new File(exportDir, shortcut.file.getName());
+            if (FileUtils.copy(shortcut.file, exportFile)) {
+                Toast.makeText(getContext(), "Shortcut exported to " + exportFile.getPath(), Toast.LENGTH_LONG).show();
+            } else {
+                Toast.makeText(getContext(), "Failed to export shortcut.", Toast.LENGTH_SHORT).show();
+            }
+        }
+
+        private void shareShortcutToCommunity(Shortcut shortcut) {
+            final Context context = getContext();
+            if (context == null) return;
+
+            if (!AppUtils.isNetworkAvailable(context)) {
+                ContentDialog.alert(context, R.string.no_internet_connection, null);
+                return;
+            }
+
+            final String currentName = shortcut.name;
+            final String exeName = shortcut.getExecutable();
+            final String steamId = shortcut.getExtra("steam_id");
+            final String communityImage = shortcut.getExtra("community_image");
+
+            // Step 1: If it's already tagged with a Steam ID, ask to confirm
+            if (!steamId.isEmpty()) {
+                ContentDialog dialog = new ContentDialog(context);
+                dialog.setTitle("Confirm Game Info");
+                dialog.setMessage("This configuration is tagged as:\n\n<b>" + currentName + "</b>\n\nIs this correct for the community?");
+                ((TextView)dialog.findViewById(R.id.BTConfirm)).setText("YES");
+                ((TextView)dialog.findViewById(R.id.BTCancel)).setText("NO, SEARCH");
+                dialog.setOnConfirmCallback(() -> performCommunityUpload(shortcut, currentName, steamId, communityImage));
+                dialog.setOnCancelCallback(() -> {
+                    showCommunitySearchPrompt(shortcut, currentName);
+                });
+                dialog.show();
+                return;
+            }
+
+            // Step 2: Try to find info automatically via PCGamingWiki (Searching by EXE)
+            android.app.Dialog loadingDialog = new android.app.Dialog(context);
+            loadingDialog.setContentView(new android.widget.ProgressBar(context));
+            loadingDialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);
+            loadingDialog.setCancelable(false);
+            loadingDialog.show();
+
+            com.winlator.cmod.core.pcgw.PCGamingWikiAPI pcgwApi = com.winlator.cmod.core.CoverArtManager.getPCGWRetrofit().create(com.winlator.cmod.core.pcgw.PCGamingWikiAPI.class);
+            String where = "Executable.File LIKE \"%" + exeName + "%\" OR Executable.File LIKE \"%" + exeName.toLowerCase() + "%\"";
+            
+            pcgwApi.searchByExecutable("cargoquery", "Executable", "Executable._pageName=GameTitle", where, "json").enqueue(new retrofit2.Callback<com.winlator.cmod.core.pcgw.PCGWResponse>() {
+                @Override
+                public void onResponse(retrofit2.Call<com.winlator.cmod.core.pcgw.PCGWResponse> call, retrofit2.Response<com.winlator.cmod.core.pcgw.PCGWResponse> response) {
+                    if (getActivity() == null) return;
+                    getActivity().runOnUiThread(() -> {
+                        if (response.isSuccessful() && response.body() != null && response.body().cargoquery != null && !response.body().cargoquery.isEmpty()) {
+                            if (loadingDialog.isShowing()) loadingDialog.dismiss();
+                            
+                            // Get best name from PCGW
+                            String pcgwName = response.body().cargoquery.get(0).title.gameTitle;
+                            int bestScore = Integer.MAX_VALUE;
+                            for (com.winlator.cmod.core.pcgw.PCGWResponse.CargoItem item : response.body().cargoquery) {
+                                int score = calculateMatchScore(currentName, item.title.gameTitle);
+                                if (score < bestScore) {
+                                    bestScore = score;
+                                    pcgwName = item.title.gameTitle;
+                                }
+                            }
+                            final String finalSuggestedName = cleanGameName(currentName, pcgwName);
+                            
+                            ContentDialog dialog = new ContentDialog(context);
+                            dialog.setTitle("Confirm Game Info");
+                            dialog.setMessage("Identified via EXE:\n\n<b>" + finalSuggestedName + "</b>\n\nIs this correct?");
+                            ((TextView)dialog.findViewById(R.id.BTConfirm)).setText("YES");
+                            ((TextView)dialog.findViewById(R.id.BTCancel)).setText("NO, SEARCH");
+                            dialog.setOnConfirmCallback(() -> searchGameForSharing(shortcut, finalSuggestedName, true));
+                            dialog.setOnCancelCallback(() -> {
+                                showCommunitySearchPrompt(shortcut, currentName);
+                            });
+                            dialog.show();
+                        } else {
+                            // Fallback to Steam Search if PCGW fails
+                            trySteamSearchForSharing(shortcut, currentName, exeName, loadingDialog);
+                        }
+                    });
+                }
+
+                @Override
+                public void onFailure(retrofit2.Call<com.winlator.cmod.core.pcgw.PCGWResponse> call, Throwable t) {
+                    if (getActivity() == null) return;
+                    getActivity().runOnUiThread(() -> trySteamSearchForSharing(shortcut, currentName, exeName, loadingDialog));
+                }
+            });
+        }
+
+        private void trySteamSearchForSharing(Shortcut shortcut, String currentName, String exeName, android.app.Dialog loadingDialog) {
+            Context context = getContext();
+            if (context == null) return;
+
+            com.winlator.cmod.core.steam.SteamStoreAPI steamApi = com.winlator.cmod.core.CoverArtManager.getSteamRetrofit().create(com.winlator.cmod.core.steam.SteamStoreAPI.class);
+            String folderName = shortcut.getParentFolderName();
+            String cleanedExe = exeName.toLowerCase().replace(".exe", "")
+                    .replaceAll("(?i)(_)?(x64|x86|win64|win32|shipping|launcher|setup|installer)$", "")
+                    .replaceAll("[^a-z0-9]", " ").trim();
+            
+            String searchTerm = currentName;
+            if (!folderName.isEmpty() && folderName.length() > 2) searchTerm = folderName;
+            else if (cleanedExe.length() > 3) searchTerm = cleanedExe;
+
+            final String finalSearchTerm = searchTerm;
+            steamApi.search(finalSearchTerm, "english", "US").enqueue(new retrofit2.Callback<com.winlator.cmod.core.steam.SteamSearchResponse>() {
+                @Override
+                public void onResponse(retrofit2.Call<com.winlator.cmod.core.steam.SteamSearchResponse> call, retrofit2.Response<com.winlator.cmod.core.steam.SteamSearchResponse> response) {
+                    if (getActivity() == null) return;
+                    getActivity().runOnUiThread(() -> {
+                        if (loadingDialog.isShowing()) loadingDialog.dismiss();
+                        String suggestedName = currentName;
+                        if (response.isSuccessful() && response.body() != null && response.body().items != null && !response.body().items.isEmpty()) {
+                            suggestedName = findBestSteamMatch(finalSearchTerm, response.body().items);
+                        }
+                        final String finalSuggestedName = suggestedName;
+
+                        ContentDialog dialog = new ContentDialog(context);
+                        dialog.setTitle("Confirm Game Info");
+                        dialog.setMessage("Is this configuration for:\n\n<b>" + finalSuggestedName + "</b>?");
+                        ((TextView)dialog.findViewById(R.id.BTConfirm)).setText("YES");
+                        ((TextView)dialog.findViewById(R.id.BTCancel)).setText("NO, SEARCH");
+                        dialog.setOnConfirmCallback(() -> searchGameForSharing(shortcut, finalSuggestedName, true));
+                        dialog.setOnCancelCallback(() -> {
+                            showCommunitySearchPrompt(shortcut, currentName);
+                        });
+                        dialog.show();
+                    });
+                }
+
+                @Override
+                public void onFailure(retrofit2.Call<com.winlator.cmod.core.steam.SteamSearchResponse> call, Throwable t) {
+                    if (getActivity() == null) return;
+                    getActivity().runOnUiThread(() -> {
+                        if (loadingDialog.isShowing()) loadingDialog.dismiss();
+                        showCommunitySearchPrompt(shortcut, currentName);
+                    });
+                }
+            });
+        }
+
+        private void showCommunitySearchPrompt(Shortcut shortcut, String initialValue) {
+            Context context = getContext();
+            if (context == null) return;
+
+            ContentDialog dialog = new ContentDialog(context);
+            dialog.setTitle(R.string.search_game_info);
+            dialog.setMessage(getString(R.string.community_search_instruction));
+            
+            final android.widget.EditText editText = dialog.findViewById(R.id.EditText);
+            editText.setVisibility(View.VISIBLE);
+            
+            // Apply independent styling to ensure visibility in both light and dark themes
+            boolean isDarkMode = ThemeManager.isDarkMode(context);
+            if (isDarkMode) {
+                editText.setTextColor(android.graphics.Color.WHITE);
+                editText.setHintTextColor(android.graphics.Color.GRAY);
+                editText.setBackgroundResource(R.drawable.edit_text_dark);
+            } else {
+                editText.setTextColor(android.graphics.Color.BLACK);
+                editText.setHintTextColor(android.graphics.Color.GRAY);
+                editText.setBackgroundResource(R.drawable.edit_text);
+            }
+
+            if (initialValue != null) editText.setText(initialValue);
+            
+            dialog.setOnConfirmCallback(() -> {
+                String query = editText.getText().toString().trim();
+                if (!query.isEmpty()) {
+                    searchGameForSharing(shortcut, query, false);
+                } else {
+                    Toast.makeText(context, "Please enter a game name", Toast.LENGTH_SHORT).show();
+                }
+            });
+            dialog.show();
+        }
+
+        private void searchGameForSharing(Shortcut shortcut, String query, boolean autoSelect) {
+            Context context = getContext();
+            if (context == null) return;
+
+            if (!AppUtils.isNetworkAvailable(context)) {
+                ContentDialog.alert(context, R.string.no_internet_connection, null);
+                return;
+            }
+
+            final String apiKey = CoverArtManager.getSteamGridDBApiKey(context);
+            SteamGridDBApi api = com.winlator.cmod.core.CoverArtManager.getRetrofit().create(SteamGridDBApi.class);
+
+            api.searchGame("Bearer " + apiKey, query).enqueue(new retrofit2.Callback<SteamGridSearchResponse>() {
+                @Override
+                public void onResponse(retrofit2.Call<SteamGridSearchResponse> call, retrofit2.Response<SteamGridSearchResponse> response) {
+                    if (response.isSuccessful() && response.body() != null && response.body().data != null && !response.body().data.isEmpty()) {
+                        List<SteamGridSearchResponse.GameData> games = response.body().data;
+
+                        // If autoSelect is enabled and we have a match, skip the list dialog
+                        if (autoSelect && !games.isEmpty()) {
+                            fetchSgdbDetailsAndUpload(shortcut, games.get(0), api, apiKey);
+                            return;
+                        }
+
+                        String[] names = new String[games.size()];
+                        for (int i = 0; i < games.size(); i++) names[i] = games.get(i).name;
+
+                        Activity activity = getActivity();
+                        if (activity != null) activity.runOnUiThread(() -> {
+                            ContentDialog.showSingleChoiceList(context, "Select Game", names, index -> {
+                                fetchSgdbDetailsAndUpload(shortcut, games.get(index), api, apiKey);
+                            });
+                        });
+                    } else {
+                        Activity activity = getActivity();
+                        if (activity != null) activity.runOnUiThread(() -> {
+                            Toast.makeText(context, "No games found on SteamGridDB. Uploading with current info.", Toast.LENGTH_SHORT).show();
+                            performCommunityUpload(shortcut, shortcut.name, "", "");
+                        });
+                    }
+                }
+
+                @Override
+                public void onFailure(retrofit2.Call<SteamGridSearchResponse> call, Throwable t) {
+                    Activity activity = getActivity();
+                    if (activity != null) activity.runOnUiThread(() -> performCommunityUpload(shortcut, shortcut.name, "", ""));
+                }
+            });
+        }
+
+        private void fetchSgdbDetailsAndUpload(Shortcut shortcut, SteamGridSearchResponse.GameData selected, SteamGridDBApi api, String apiKey) {
+            api.getGameDetails("Bearer " + apiKey, selected.id).enqueue(new retrofit2.Callback<SteamGridGameDetailsResponse>() {
+                @Override
+                public void onResponse(retrofit2.Call<SteamGridGameDetailsResponse> call, retrofit2.Response<SteamGridGameDetailsResponse> response) {
+                    String foundSteamId = "";
+                    if (response.isSuccessful() && response.body() != null && response.body().data != null) {
+                        if (response.body().data.externalIds != null && response.body().data.externalIds.steam != null) {
+                            foundSteamId = response.body().data.externalIds.steam.id;
+                        }
+                    }
+
+                    final String finalSteamId = foundSteamId;
+                    if (finalSteamId.isEmpty()) {
+                        api.getGridsByGameId("Bearer " + apiKey, selected.id, "no_logo", null, "static").enqueue(new retrofit2.Callback<com.winlator.cmod.core.steamgrid.SteamGridGridsResponse>() {
+                            @Override
+                            public void onResponse(retrofit2.Call<com.winlator.cmod.core.steamgrid.SteamGridGridsResponse> call, retrofit2.Response<com.winlator.cmod.core.steamgrid.SteamGridGridsResponse> response) {
+                                String fallbackImage = "";
+                                if (response.isSuccessful() && response.body() != null && response.body().data != null && !response.body().data.isEmpty()) {
+                                    fallbackImage = response.body().data.get(0).url;
+                                }
+                                final String finalFallback = fallbackImage;
+                                Activity activity2 = getActivity();
+                                if (activity2 != null) activity2.runOnUiThread(() -> performCommunityUpload(shortcut, selected.name, "", finalFallback));
+                            }
+
+                            @Override public void onFailure(retrofit2.Call<com.winlator.cmod.core.steamgrid.SteamGridGridsResponse> call, Throwable t) {
+                                Activity activity2 = getActivity();
+                                if (activity2 != null) activity2.runOnUiThread(() -> performCommunityUpload(shortcut, selected.name, "", ""));
+                            }
+                        });
+                    } else {
+                        Activity activity2 = getActivity();
+                        if (activity2 != null) activity2.runOnUiThread(() -> performCommunityUpload(shortcut, selected.name, finalSteamId, ""));
+                    }
+                }
+
+                @Override public void onFailure(retrofit2.Call<SteamGridGameDetailsResponse> call, Throwable t) {
+                    Activity activity2 = getActivity();
+                    if (activity2 != null) activity2.runOnUiThread(() -> performCommunityUpload(shortcut, selected.name, "", ""));
+                }
+            });
+        }
+
+        private void performCommunityUpload(Shortcut shortcut, String gameName, String steamId, String communityImage) {
+            final Context context = getContext();
+            if (context == null) return;
+
+            ContentDialog uploadDialog = new ContentDialog(context, R.layout.community_upload_dialog);
+            uploadDialog.setTitle("Community Upload");
+            
+            final android.widget.EditText etTitle = uploadDialog.findViewById(R.id.ETConfigTitle);
+            final android.widget.EditText etNotes = uploadDialog.findViewById(R.id.ETConfigNotes);
+            
+            boolean isDarkMode = ThemeManager.isDarkMode(context);
+            int textColor = isDarkMode ? android.graphics.Color.WHITE : android.graphics.Color.BLACK;
+            int hintColor = android.graphics.Color.GRAY;
+            int bgRes = isDarkMode ? R.drawable.edit_text_dark : R.drawable.edit_text;
+
+            etTitle.setTextColor(textColor); etTitle.setHintTextColor(hintColor); etTitle.setBackgroundResource(bgRes);
+            etNotes.setTextColor(textColor); etNotes.setHintTextColor(hintColor); etNotes.setBackgroundResource(bgRes);
+
+            uploadDialog.setOnConfirmCallback(() -> {
+                String title = etTitle.getText().toString().trim();
+                String notes = etNotes.getText().toString().trim();
+                if (title.isEmpty()) {
+                    Toast.makeText(context, "Config title is required", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                confirmAndUpload(shortcut, gameName, steamId, communityImage, notes, title);
+            });
+            uploadDialog.show();
+        }
+
+        private void confirmAndUpload(Shortcut shortcut, String gameName, String steamId, String communityImage, String notes, String configTitle) {
+            final Context context = getContext();
+            ContentDialog.confirm(context, "Share configuration for '" + gameName + "'?", () -> {
+                org.json.JSONObject config = CommunityConfigUtils.exportConfig(context, shortcut, gameName, steamId, communityImage, notes, configTitle);
+                if (config != null) {
+                    final MainActivity activity = (MainActivity) getActivity();
+                    if (activity != null) activity.preloaderDialog.show("Uploading Configuration...");
+                    CommunityConfigManager.uploadConfig(config, error -> {
+                        if (activity == null) return;
+                        activity.runOnUiThread(() -> {
+                            activity.preloaderDialog.close();
+                            if (error == null) {
+                                Toast.makeText(context, "Uploaded successfully!", Toast.LENGTH_LONG).show();
+                            } else {
+                                ContentDialog.alert(context, "Upload failed:\n\n" + error, null);
+                            }
+                        });
+                    });
+                } else {
+                    ContentDialog.alert(context, "Please configure and select a valid Wine runtime before sharing.", null);
+                }
+            });
+        }
+
+        private void showShortcutProperties(Shortcut shortcut) {
+            Context context = getContext();
+            if (context == null) return;
+
+            ContentDialog dialog = new ContentDialog(context, R.layout.shortcut_properties_dialog);
+            dialog.setTitle("Properties");
+            dialog.setIcon(R.drawable.ic_nav_info);
+
+            View cancelBtn = dialog.findViewById(R.id.BTCancel);
+            if (cancelBtn != null) cancelBtn.setVisibility(View.GONE);
+
+            android.content.SharedPreferences playtimePrefs = context.getSharedPreferences("playtime_stats", Context.MODE_PRIVATE);
+            String playtimeKey = shortcut.name + "_playtime";
+            String playCountKey = shortcut.name + "_play_count";
+
+            TextView tvPlayCount = dialog.findViewById(R.id.play_count);
+            TextView tvPlaytime = dialog.findViewById(R.id.playtime);
+            TextView tvDetails = dialog.findViewById(R.id.shortcut_details);
+            android.widget.Button btnReset = dialog.findViewById(R.id.reset_properties);
+
+            long totalMs = playtimePrefs.getLong(playtimeKey, 0L);
+            int playCount = playtimePrefs.getInt(playCountKey, 0);
+
+            long seconds = (totalMs / 1000) % 60;
+            long minutes = (totalMs / (1000 * 60)) % 60;
+            long hours = (totalMs / (1000 * 60 * 60)) % 24;
+            long days = (totalMs / (1000 * 60 * 60 * 24));
+            String formattedTime = String.format("%dd %02dh %02dm %02ds", days, hours, minutes, seconds);
+
+            if (tvPlayCount != null) tvPlayCount.setText("Number of times played: " + playCount);
+            if (tvPlaytime != null) tvPlaytime.setText("Playtime: " + formattedTime);
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("<b>Name:</b> ").append(shortcut.name).append("<br/>");
+            sb.append("<b>Container:</b> ").append(shortcut.container.getName()).append("<br/>");
+
+            String rawWine = shortcut.getExtra("wineVersion", shortcut.container.getWineVersion());
+            String displayWine = formatWineVersionForDisplay(rawWine);
+            if (displayWine.isEmpty()) displayWine = shortcut.container.getName();
+            sb.append("<b>Wine:</b> ").append(displayWine).append("<br/>");
+
+            String gv = shortcut.getGameVersion();
+            if (gv != null && !gv.isEmpty()) {
+                sb.append("<b>Game Version:</b> ").append(gv).append("<br/>");
+            }
+
+            com.winlator.cmod.win32.PEParser.FileVersionInfo fi = shortcut.getFileVersionInfo();
+            if (fi != null) {
+                if (fi.ProductName != null && !fi.ProductName.isEmpty()) {
+                    sb.append("<b>Product:</b> ").append(fi.ProductName).append("<br/>");
+                }
+                if (fi.CompanyName != null && !fi.CompanyName.isEmpty()) {
+                    sb.append("<b>Company:</b> ").append(fi.CompanyName).append("<br/>");
+                }
+                if (fi.FileDescription != null && !fi.FileDescription.isEmpty()) {
+                    sb.append("<b>Description:</b> ").append(fi.FileDescription).append("<br/>");
+                }
+                if (fi.LegalCopyright != null && !fi.LegalCopyright.isEmpty()) {
+                    sb.append("<b>Copyright:</b> ").append(fi.LegalCopyright).append("<br/>");
+                }
+            }
+
+            sb.append("<b>Path:</b> ").append(shortcut.path).append("<br/>");
+            sb.append("<b>File:</b> ").append(shortcut.file != null ? shortcut.file.getPath() : "");
+
+            if (tvDetails != null) {
+                tvDetails.setText(android.text.Html.fromHtml(sb.toString(), android.text.Html.FROM_HTML_MODE_LEGACY));
+            }
+
+            if (btnReset != null) {
+                btnReset.setOnClickListener(v -> {
+                    playtimePrefs.edit().remove(playtimeKey).remove(playCountKey).apply();
+                    if (tvPlayCount != null) tvPlayCount.setText("Number of times played: 0");
+                    if (tvPlaytime != null) tvPlaytime.setText("Playtime: 0d 00h 00m 00s");
+                    Toast.makeText(context, "Properties reset", Toast.LENGTH_SHORT).show();
+                });
+            }
+
+            dialog.show();
+        }
+
+        public static String formatWineVersionForDisplay(String raw) {
+            if (raw == null || raw.trim().isEmpty()) return "";
+            String s = raw.trim();
+
+            // Strip common archive and package extensions
+            for (String ext : new String[]{".tzst", ".tar.xz", ".tar.zst", ".tar.gz", ".wcp", ".zip"}) {
+                if (s.toLowerCase().endsWith(ext)) {
+                    s = s.substring(0, s.length() - ext.length()).trim();
+                }
+            }
+
+            // Strip trailing versionCode (e.g. "-1" in "Proton-11.0-1-arm64ec-1")
+            if (s.matches(".*-[0-9]+$")) {
+                int lastDash = s.lastIndexOf('-');
+                if (lastDash > 0) {
+                    String beforeDash = s.substring(0, lastDash);
+                    String lowerBefore = beforeDash.toLowerCase();
+                    if (lowerBefore.contains("arm64") || lowerBefore.contains("x86") || lowerBefore.contains("wine") || lowerBefore.contains("proton")) {
+                        s = beforeDash;
+                    }
+                }
+            }
+
+            // Detect architecture
+            String arch = "";
+            String lower = s.toLowerCase();
+            if (lower.contains("arm64ec")) {
+                arch = " arm64ec";
+            } else if (lower.contains("x86_64") || lower.contains("x86-64") || lower.contains("x64")) {
+                arch = " x86_64";
+            } else if (lower.contains("x86") || lower.contains("i386")) {
+                arch = " x86";
+            }
+
+            // Strip architecture tokens from core version string
+            String core = s;
+            core = core.replaceAll("(?i)[-_\\s]+arm64ec", "");
+            core = core.replaceAll("(?i)[-_\\s]+x86_64", "");
+            core = core.replaceAll("(?i)[-_\\s]+x86-64", "");
+            core = core.replaceAll("(?i)[-_\\s]+x86", "");
+            core = core.replaceAll("(?i)[-_\\s]+i386", "");
+
+            // Format prefix cleanly
+            if (core.toLowerCase().startsWith("ge-proton")) {
+                String rest = core.substring(9);
+                if (rest.startsWith("-") || rest.startsWith(" ")) rest = rest.substring(1).trim();
+                return "GE-Proton " + rest + arch;
+            } else if (core.toLowerCase().startsWith("proton")) {
+                String rest = core.substring(6);
+                if (rest.startsWith("-") || rest.startsWith(" ")) rest = rest.substring(1).trim();
+                return "Proton " + rest + arch;
+            } else if (core.toLowerCase().startsWith("wine")) {
+                String rest = core.substring(4);
+                if (rest.startsWith("-") || rest.startsWith(" ")) rest = rest.substring(1).trim();
+                return "Wine " + rest + arch;
+            }
+
+            return (core + arch).trim();
+        }
+
+        class ViewHolder extends RecyclerView.ViewHolder {
+            private final ImageView coverArt;
+            private final TextView title;
+            private final ImageButton menuButton;
+            private final View innerArea;
+
+            public ViewHolder(View view) {
+                super(view);
+                coverArt = view.findViewById(R.id.ImageView);
+                title = view.findViewById(R.id.TVTitle);
+                menuButton = view.findViewById(R.id.BTMenu);
+                innerArea = view.findViewById(R.id.LLInnerArea);
+            }
+        }
+    }
+
+    private interface OnContainerSelectedListener {
+        void onContainerSelected(Container container);
+    }
+
+    public static void addShortcutToScreen(Shortcut shortcut) {
+        Context context = shortcut.container.getManager().getContext();
+        ShortcutManager shortcutManager = context.getSystemService(ShortcutManager.class);
+        if (shortcutManager != null && shortcutManager.isRequestPinShortcutSupported()) {
+            Icon icon = shortcut.icon != null ? Icon.createWithBitmap(shortcut.icon) : Icon.createWithResource(context, R.drawable.icon_shortcut);
+            ShortcutInfo shortcutInfo = buildScreenShortCut(context, shortcut.name, shortcut.name, shortcut.container.id, shortcut.file.getPath(), icon, shortcut.name);
+            shortcutManager.requestPinShortcut(shortcutInfo, null);
+        }
+    }
+
+    public static void disableShortcutOnScreen(Context context, Shortcut shortcut) {
+        ShortcutManager shortcutManager = context.getSystemService(ShortcutManager.class);
+        if (shortcutManager != null) {
+            ArrayList<String> ids = new ArrayList<>();
+            ids.add(shortcut.name);
+            shortcutManager.disableShortcuts(ids);
+        }
+    }
+
+    public void updateShortcutOnScreen(String id, String label, int containerId, String shortcutPath, Icon icon, String shortcutName) {
+        Context context = getContext();
+        if (context == null) return;
+        ShortcutManager shortcutManager = context.getSystemService(ShortcutManager.class);
+        if (shortcutManager != null) {
+            ArrayList<ShortcutInfo> shortcuts = new ArrayList<>();
+            shortcuts.add(buildScreenShortCut(context, id, label, containerId, shortcutPath, icon, shortcutName));
+            shortcutManager.updateShortcuts(shortcuts);
+        }
+    }
+
+    public static ShortcutInfo buildScreenShortCut(Context context, String id, String label, int containerId, String shortcutPath, Icon icon, String shortcutName) {
+        Intent intent = new Intent(context, XServerDisplayActivity.class);
+        intent.setAction(Intent.ACTION_VIEW);
+        intent.putExtra("container_id", containerId);
+        intent.putExtra("shortcut_path", shortcutPath);
+        intent.putExtra("shortcut_name", shortcutName);
+
+        return new ShortcutInfo.Builder(context, id)
+                .setShortLabel(label)
+                .setIcon(icon)
+                .setIntent(intent)
+                .build();
+    }
+
+    private static boolean isVerticalArtTarget(int target) {
+        return target == ART_TARGET_VERTICAL_GAME_ART || target == ART_TARGET_VERTICAL_GAME_BACKGROUND;
+    }
+
+    private static boolean isBackgroundArtTarget(int target) {
+        return target == ART_TARGET_HORIZONTAL_GAME_BACKGROUND
+                || target == ART_TARGET_VERTICAL_GAME_BACKGROUND;
+    }
+
+    private static boolean usesHorizontalHeroArt(int target) {
+        return target == ART_TARGET_HORIZONTAL_GAME_BACKGROUND;
+    }
+
+    private int getArtSearchTitle(int target) {
+        if (isBackgroundArtTarget(target)) return R.string.search_hero_art;
+        return R.string.search_game_art;
+    }
+
+    // The same PCGamingWiki -> Steam -> SteamGridDB name-matching chain is used for each art target.
+    private void showArtSelectionDialog(Shortcut shortcut, int target) {
+        Context context = getContext();
+        if (context == null) return;
+
+        String defaultName = shortcut.name.replaceAll("\\(.*?\\)", "").replaceAll("\\[.*?\\]", "").trim();
+        String exeName = shortcut.getExecutable();
+        String folderName = shortcut.getParentFolderName();
+
+        if (AppUtils.isNetworkAvailable(context)) {
+            android.app.Dialog loadingDialog = new android.app.Dialog(context);
+            loadingDialog.setContentView(new android.widget.ProgressBar(context));
+            loadingDialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);
+            loadingDialog.setCancelable(false);
+            loadingDialog.show();
+
+            com.winlator.cmod.core.pcgw.PCGamingWikiAPI pcgwApi = com.winlator.cmod.core.CoverArtManager.getPCGWRetrofit().create(com.winlator.cmod.core.pcgw.PCGamingWikiAPI.class);
+            String where = "Executable.File LIKE \"%" + exeName + "%\" OR Executable.File LIKE \"%" + exeName.toLowerCase() + "%\"";
+
+            pcgwApi.searchByExecutable("cargoquery", "Executable", "Executable._pageName=GameTitle", where, "json").enqueue(new retrofit2.Callback<com.winlator.cmod.core.pcgw.PCGWResponse>() {
+                @Override
+                public void onResponse(retrofit2.Call<com.winlator.cmod.core.pcgw.PCGWResponse> call, retrofit2.Response<com.winlator.cmod.core.pcgw.PCGWResponse> response) {
+                    if (!isAdded() || getActivity() == null || getActivity().isFinishing()) return;
+                    if (response.isSuccessful() && response.body() != null && response.body().cargoquery != null && !response.body().cargoquery.isEmpty()) {
+                        if (loadingDialog.isShowing()) loadingDialog.dismiss();
+
+                        String bestName = response.body().cargoquery.get(0).title.gameTitle;
+                        int bestScore = Integer.MAX_VALUE;
+
+                        for (com.winlator.cmod.core.pcgw.PCGWResponse.CargoItem item : response.body().cargoquery) {
+                            int score = calculateMatchScore(defaultName, item.title.gameTitle);
+                            if (score < bestScore) {
+                                bestScore = score;
+                                bestName = item.title.gameTitle;
+                            }
+                        }
+
+                        String suggestedName = cleanGameName(defaultName, bestName);
+                        Toast.makeText(context, "Matched via PCGamingWiki: " + suggestedName, Toast.LENGTH_SHORT).show();
+                        showSearchPrompt(shortcut, suggestedName, target);
+                    } else {
+                        trySteamSearch(shortcut, defaultName, folderName, loadingDialog, target);
+                    }
+                }
+
+                @Override
+                public void onFailure(retrofit2.Call<com.winlator.cmod.core.pcgw.PCGWResponse> call, Throwable t) {
+                    if (!isAdded() || getActivity() == null || getActivity().isFinishing()) return;
+                    trySteamSearch(shortcut, defaultName, folderName, loadingDialog, target);
+                }
+            });
+        } else {
+            showSearchPrompt(shortcut, defaultName, target);
+        }
+    }
+
+    private void trySteamSearch(Shortcut shortcut, String defaultName, String folderName,
+                                android.app.Dialog loadingDialog, int target) {
+        Context context = getContext();
+        if (context == null) return;
+        
+        com.winlator.cmod.core.steam.SteamStoreAPI steamApi = com.winlator.cmod.core.CoverArtManager.getSteamRetrofit().create(com.winlator.cmod.core.steam.SteamStoreAPI.class);
+        
+        // Improve fallback: try folder name first, then cleaned exe name, finally the shortcut name
+        String exeName = shortcut.getExecutable();
+        String cleanedExe = exeName.toLowerCase().replace(".exe", "")
+                .replaceAll("(?i)(_)?(x64|x86|win64|win32|shipping|launcher|setup|installer)$", "")
+                .replaceAll("[^a-z0-9]", " ").trim();
+        
+        String searchTerm = defaultName;
+        if (!folderName.isEmpty() && folderName.length() > 2) {
+            searchTerm = folderName;
+        } else if (cleanedExe.length() > 3) {
+            searchTerm = cleanedExe;
+        }
+        
+        final String finalSearchTerm = searchTerm;
+        steamApi.search(finalSearchTerm, "english", "US").enqueue(new retrofit2.Callback<com.winlator.cmod.core.steam.SteamSearchResponse>() {
+            @Override
+            public void onResponse(retrofit2.Call<com.winlator.cmod.core.steam.SteamSearchResponse> call, retrofit2.Response<com.winlator.cmod.core.steam.SteamSearchResponse> response) {
+                if (!isAdded() || getActivity() == null || getActivity().isFinishing()) return;
+                if (loadingDialog.isShowing()) loadingDialog.dismiss();
+                String suggestedName = defaultName;
+                if (response.isSuccessful() && response.body() != null && response.body().items != null && !response.body().items.isEmpty()) {
+                    suggestedName = findBestSteamMatch(finalSearchTerm, response.body().items);
+                    Toast.makeText(context, "Matched via Steam: " + suggestedName, Toast.LENGTH_SHORT).show();
+                } else if (!folderName.isEmpty() && folderName.length() > 2) {
+                    suggestedName = folderName;
+                } else if (cleanedExe.length() > 3) {
+                    suggestedName = cleanedExe;
+                }
+                showSearchPrompt(shortcut, suggestedName, target);
+            }
+
+            @Override
+            public void onFailure(retrofit2.Call<com.winlator.cmod.core.steam.SteamSearchResponse> call, Throwable t) {
+                if (!isAdded() || getActivity() == null || getActivity().isFinishing()) return;
+                if (loadingDialog.isShowing()) loadingDialog.dismiss();
+                String suggestedName = !folderName.isEmpty() && folderName.length() > 2 ? folderName : defaultName;
+                showSearchPrompt(shortcut, suggestedName, target);
+            }
+        });
+    }
+
+    private int calculateMatchScore(String query, String target) {
+        String q = query.toLowerCase().replaceAll("[^a-z0-9]", "");
+        String t = target.toLowerCase().replaceAll("[^a-z0-9]", "");
+        
+        // Base score is the difference in length
+        int score = Math.abs(q.length() - t.length());
+        
+        // Heavy penalty for "Remastered" if query doesn't have it
+        if (t.contains("remaster") && !q.contains("remaster")) score += 30;
+        
+        // Penalty for "Edition" or "Pack" if query is basic
+        if ((t.contains("edition") || t.contains("pack") || t.contains("bundle")) && 
+            !(q.contains("edition") || q.contains("pack") || q.contains("bundle"))) {
+            score += 15;
+        }
+
+        // Penalty for very long names (usually subtitles/DLCs)
+        if (t.length() > q.length() + 10) score += 10;
+        
+        // Bonus for containing the exact query
+        if (t.contains(q)) score -= 5;
+        
+        return score;
+    }
+
+    private String cleanGameName(String query, String foundName) {
+        String resultName = foundName;
+        boolean queryIsBasic = !query.toLowerCase().contains("remaster") && !query.toLowerCase().contains("edition");
+        
+        if (queryIsBasic) {
+            String lowercaseName = resultName.toLowerCase();
+            // Order is important: more specific first
+            if (lowercaseName.contains("remastered")) {
+                resultName = resultName.replaceAll("(?i)\\s*[:-]?\\s*remastered\\s*", " ").trim();
+            } else if (lowercaseName.contains("remaster")) {
+                resultName = resultName.replaceAll("(?i)\\s*[:-]?\\s*remaster\\s*", " ").trim();
+            }
+            
+            if (!query.toLowerCase().contains("edition")) {
+                resultName = resultName.replaceAll("(?i)\\s*[:-]?\\s*(standard|gold|ultimate|complete|deluxe|game of the year|goty|director's cut)\\s+edition\\s*", " ").trim();
+                resultName = resultName.replaceAll("(?i)\\s*[:-]?\\s*edition\\s*", " ").trim();
+            }
+        }
+        return resultName.replaceAll("\\s+", " ").trim();
+    }
+
+    private String findBestSteamMatch(String query, List<com.winlator.cmod.core.steam.SteamSearchResponse.SteamItem> items) {
+        com.winlator.cmod.core.steam.SteamSearchResponse.SteamItem bestMatch = items.get(0);
+        int bestScore = Integer.MAX_VALUE;
+
+        for (com.winlator.cmod.core.steam.SteamSearchResponse.SteamItem item : items) {
+            int score = calculateMatchScore(query, item.name);
+            if (score < bestScore) {
+                bestScore = score;
+                bestMatch = item;
+            }
+        }
+        
+        return cleanGameName(query, bestMatch.name);
+    }
+
+    private void showSearchPrompt(Shortcut shortcut, String initialValue, int target) {
+        ContentDialog.prompt(getContext(), getArtSearchTitle(target), initialValue, (query) -> {
+            performArtSearch(shortcut, query, target);
+        });
+    }
+
+    private void performArtSearch(Shortcut shortcut, String query, int target) {
+        Context context = getContext();
+        if (context == null) return;
+
+        android.app.Dialog loadingDialog = new android.app.Dialog(context);
+        loadingDialog.setContentView(new android.widget.ProgressBar(context));
+        loadingDialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);
+        loadingDialog.setCancelable(false);
+        loadingDialog.show();
+
+        int titleRes = getArtSearchTitle(target);
+
+        com.winlator.cmod.core.CoverArtManager.GridOptionsCallback gridCallback = new com.winlator.cmod.core.CoverArtManager.GridOptionsCallback() {
+            @Override
+            public void onOptionsAvailable(java.util.List<com.winlator.cmod.core.steamgrid.SteamGridGridsResponse.GridData> options) {
+                java.util.List<ArtOption> wrapped = new java.util.ArrayList<>();
+                for (com.winlator.cmod.core.steamgrid.SteamGridGridsResponse.GridData d : options)
+                    wrapped.add(new ArtOption() { public String thumb() { return d.thumb; } public String url() { return d.url; } });
+                showArtOptions(context, loadingDialog, titleRes, wrapped, shortcut, target, query);
+            }
+
+            @Override
+            public void onFailed(com.winlator.cmod.core.CoverArtManager.ErrorReason reason) {
+                showArtSearchError(context, loadingDialog, reason, query, shortcut, target);
+            }
+        };
+
+        com.winlator.cmod.core.CoverArtManager.HeroOptionsCallback heroCallback = new com.winlator.cmod.core.CoverArtManager.HeroOptionsCallback() {
+            @Override
+            public void onOptionsAvailable(java.util.List<com.winlator.cmod.core.steamgrid.SteamGridHeroesResponse.HeroData> options) {
+                java.util.List<ArtOption> wrapped = new java.util.ArrayList<>();
+                for (com.winlator.cmod.core.steamgrid.SteamGridHeroesResponse.HeroData d : options)
+                    wrapped.add(new ArtOption() { public String thumb() { return d.thumb; } public String url() { return d.url; } });
+                showArtOptions(context, loadingDialog, titleRes, wrapped, shortcut, target, query);
+            }
+
+            @Override
+            public void onFailed(com.winlator.cmod.core.CoverArtManager.ErrorReason reason) {
+                showArtSearchError(context, loadingDialog, reason, query, shortcut, target);
+            }
+        };
+
+        if (usesHorizontalHeroArt(target)) {
+            com.winlator.cmod.core.CoverArtManager.fetchHeroArtOptions(context, shortcut, query, heroCallback);
+        } else {
+            com.winlator.cmod.core.CoverArtManager.fetchCoverArtOptions(context, shortcut, query, false, gridCallback);
+        }
+    }
+
+    private interface ArtOption { String thumb(); String url(); }
+
+    private void showArtOptions(Context context, android.app.Dialog loadingDialog, int titleRes,
+                                java.util.List<ArtOption> options, Shortcut shortcut, int target, String query) {
+        Activity activity = getActivity();
+        if (activity == null || activity.isFinishing() || !isAdded()) return;
+        activity.runOnUiThread(() -> {
+            if (loadingDialog.isShowing()) loadingDialog.dismiss();
+            ContentDialog dialog = new ContentDialog(context, R.layout.cover_art_selection_dialog);
+            dialog.setTitle(titleRes);
+            dialog.findViewById(R.id.BTConfirm).setVisibility(View.GONE);
+
+            RecyclerView recyclerView = dialog.findViewById(R.id.RecyclerView);
+            recyclerView.setLayoutManager(new androidx.recyclerview.widget.LinearLayoutManager(context, androidx.recyclerview.widget.LinearLayoutManager.HORIZONTAL, false));
+            recyclerView.setVisibility(View.VISIBLE);
+            dialog.findViewById(R.id.ProgressBar).setVisibility(View.GONE);
+            boolean widePreview = isBackgroundArtTarget(target);
+
+            recyclerView.setAdapter(new RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+                @NonNull
+                @Override
+                public RecyclerView.ViewHolder onCreateViewHolder(@NonNull android.view.ViewGroup parent, int viewType) {
+                    int itemLayout = widePreview ? R.layout.hero_art_selection_item : R.layout.cover_art_selection_item;
+                    View view = LayoutInflater.from(context).inflate(itemLayout, parent, false);
+                    return new RecyclerView.ViewHolder(view) {};
+                }
+
+                @Override
+                public void onBindViewHolder(@NonNull RecyclerView.ViewHolder holder, int position) {
+                    ArtOption data = options.get(position);
+                    ImageView imageView = holder.itemView.findViewById(R.id.ImageView);
+                    com.bumptech.glide.request.RequestOptions options2 = new com.bumptech.glide.request.RequestOptions();
+                    // Hero thumbnails show the whole banner uncropped (it's a preview, not a fill target) --
+                    // cover art keeps cropping to fill its portrait box, matching the shortcut grid it previews for.
+                    if (widePreview) options2 = options2.fitCenter(); else options2 = options2.centerCrop();
+                    Glide.with(context)
+                            .load(data.thumb() != null ? data.thumb() : data.url())
+                            .placeholder(R.drawable.cover_art_placeholder)
+                            .thumbnail(0.1f)
+                            .apply(options2)
+                            .into(imageView);
+
+                    holder.itemView.setOnClickListener(v -> {
+                        dialog.dismiss();
+                        boolean vertical = isVerticalArtTarget(target);
+                        boolean background = isBackgroundArtTarget(target);
+                        Toast.makeText(context, "Applying game art...", Toast.LENGTH_SHORT).show();
+                        com.winlator.cmod.core.CoverArtManager.DownloadCallback cb = new com.winlator.cmod.core.CoverArtManager.DownloadCallback() {
+                            @Override
+                            public void onCompleted(android.graphics.Bitmap bitmap) {
+                                Activity a = getActivity();
+                                if (a != null && !a.isFinishing() && isAdded()) a.runOnUiThread(() -> {
+                                    if (adapter != null) adapter.notifyDataSetChanged();
+                                    if (currentShortcut == shortcut) showShortcutHero(shortcut);
+                                    Toast.makeText(context, "Game art updated.", Toast.LENGTH_SHORT).show();
+                                });
+                            }
+
+                            @Override
+                            public void onFailed(com.winlator.cmod.core.CoverArtManager.ErrorReason reason) {
+                                Activity a = getActivity();
+                                if (a != null && !a.isFinishing() && isAdded()) a.runOnUiThread(() ->
+                                        Toast.makeText(context, "Failed to apply game art.", Toast.LENGTH_SHORT).show());
+                            }
+                        };
+                        com.winlator.cmod.core.CoverArtManager.downloadSelectedArt(data.url(), shortcut, vertical, background, cb);
+                    });
+                }
+
+                @Override
+                public int getItemCount() {
+                    return options.size();
+                }
+            });
+            if (!activity.isFinishing()) dialog.show();
+        });
+    }
+
+    private void showArtSearchError(Context context, android.app.Dialog loadingDialog, com.winlator.cmod.core.CoverArtManager.ErrorReason reason,
+                                    String query, Shortcut shortcut, int target) {
+        Activity activity = getActivity();
+        if (activity == null || activity.isFinishing() || !isAdded()) return;
+        activity.runOnUiThread(() -> {
+            if (loadingDialog.isShowing()) loadingDialog.dismiss();
+            String message;
+            if (reason == com.winlator.cmod.core.CoverArtManager.ErrorReason.NETWORK_UNAVAILABLE) {
+                message = "Connection Error\n\nPlease check your internet and try again. Searching requires an active connection to SteamGridDB.";
+            } else if (reason == com.winlator.cmod.core.CoverArtManager.ErrorReason.NOT_FOUND) {
+                message = "Game Not Found\n\nCould not find \"" + query + "\".\n\n" +
+                          "Try these tips:\n" +
+                          "• Check for typos\n" +
+                          "• Use the full title (e.g., 'Grand Theft Auto V')\n" +
+                          "• Try adding the year: 'God of War (2018)'\n" +
+                          "• Click 'RETRY' to try a different name.";
+            } else if (reason == com.winlator.cmod.core.CoverArtManager.ErrorReason.UNAUTHORIZED) {
+                message = "Invalid API Key\n\nThe custom SteamGridDB API key in Settings is invalid.";
+            } else if (reason == com.winlator.cmod.core.CoverArtManager.ErrorReason.RATE_LIMITED) {
+                message = "Too Many Requests\n\nPlease wait a few seconds before trying again.";
+            } else {
+                message = "Service Unavailable\n\nSteamGridDB is currently busy. Please try again later.";
+            }
+
+            ContentDialog errorDialog = new ContentDialog(context);
+            errorDialog.setTitle(getArtSearchTitle(target));
+            errorDialog.setMessage(message);
+            if (reason == com.winlator.cmod.core.CoverArtManager.ErrorReason.NOT_FOUND || reason == com.winlator.cmod.core.CoverArtManager.ErrorReason.NETWORK_UNAVAILABLE) {
+                errorDialog.setOnConfirmCallback(() -> showArtSelectionDialog(shortcut, target));
+                ((TextView)errorDialog.findViewById(R.id.BTConfirm)).setText("RETRY");
+            } else {
+                errorDialog.findViewById(R.id.BTCancel).setVisibility(View.GONE);
+            }
+            errorDialog.show();
+        });
+    }
+}

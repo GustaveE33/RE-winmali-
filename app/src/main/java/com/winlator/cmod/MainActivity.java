@@ -1,0 +1,900 @@
+package com.winlator.cmod;
+
+import android.Manifest;
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.graphics.drawable.Drawable;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Environment;
+import android.provider.Settings;
+import android.text.Html;
+import android.text.SpannableString;
+import android.text.method.LinkMovementMethod;
+import android.text.style.ForegroundColorSpan;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.TextView;
+
+import androidx.annotation.IntRange;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.ActionBar;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.core.view.GravityCompat;
+import androidx.drawerlayout.widget.DrawerLayout;
+import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentManager;
+import androidx.preference.PreferenceManager;
+
+import com.google.android.material.navigation.NavigationView;
+import com.winlator.cmod.R;
+import com.winlator.cmod.contentdialog.ContentDialog;
+import com.winlator.cmod.core.AppUtils;
+import com.winlator.cmod.core.Callback;
+import com.winlator.cmod.core.ImageUtils;
+import com.winlator.cmod.core.PreloaderDialog;
+import com.winlator.cmod.container.ContainerManager;
+import com.winlator.cmod.core.WineThemeManager;
+import com.winlator.cmod.xenvironment.ImageFsInstaller;
+
+import java.io.File;
+import java.util.List;
+
+public class MainActivity extends AppCompatActivity implements NavigationView.OnNavigationItemSelectedListener {
+    private static final String STATE_SELECTED_MENU_ITEM_ID = "selected_menu_item_id";
+    private static final String PREF_RETURN_TO_SHORTCUTS_AFTER_GAME = "return_to_shortcuts_after_game";
+    public static final @IntRange(from = 1, to = 19) byte CONTAINER_PATTERN_COMPRESSION_LEVEL = 9;
+    public static final byte PERMISSION_WRITE_EXTERNAL_STORAGE_REQUEST_CODE = 1;
+    public static final byte OPEN_FILE_REQUEST_CODE = 2;
+    public static final byte EDIT_INPUT_CONTROLS_REQUEST_CODE = 3;
+    public static final byte OPEN_DIRECTORY_REQUEST_CODE = 4;
+    public static final byte OPEN_IMAGE_REQUEST_CODE = 5;
+    private DrawerLayout drawerLayout;
+    public final PreloaderDialog preloaderDialog = new PreloaderDialog(this);
+    private boolean editInputControls = false;
+    private int selectedProfileId;
+    private ContainerManager containerManager;
+    private boolean isDarkMode;
+    private boolean startupLoadingVisible;
+    private boolean startupEntranceScheduled;
+    private Runnable startupEntranceCallback;
+
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        applyConfiguredOrientation();
+
+        isDarkMode = true;
+        setTheme(R.style.AppTheme_Dark);
+        ThemeManager.applyTheme(this);
+
+        setContentView(R.layout.main_activity);
+        registerSectionGradientCallbacks();
+        AppUtils.hideSystemUI(this);
+        UiSoundEffects.initialize(this);
+        com.winlator.cmod.core.ControllerNavigation.attach(getWindow());
+        com.winlator.cmod.logs.SessionLog.installCrashHandler(this);
+        if (savedInstanceState == null) com.winlator.cmod.logs.SessionLog.autosaveExitReasons(this);
+
+        drawerLayout = findViewById(R.id.DrawerLayout);
+        NavigationView navigationView = findViewById(R.id.NavigationView);
+        navigationView.setNavigationItemSelectedListener(this);
+        navigationView.setVisibility(View.GONE);
+        drawerLayout.setDrawerLockMode(DrawerLayout.LOCK_MODE_LOCKED_CLOSED);
+
+        androidx.appcompat.widget.Toolbar toolbar = findViewById(R.id.Toolbar);
+        setSupportActionBar(toolbar);
+        ActionBar actionBar = getSupportActionBar();
+        int accentColor = ThemeManager.getAccentColor(this);
+        if (actionBar != null) {
+            actionBar.setDisplayHomeAsUpEnabled(true);
+            setActionBarHomeIcon(R.drawable.icon_action_bar_menu);
+        }
+        if (toolbar != null) {
+            // AppCompat's Toolbar style blocks D-pad focus on touchscreen devices and makes itself a separate
+            // keyboard cluster, so a controller could never reach the hamburger or toolbar actions (e.g. +).
+            toolbar.setTouchscreenBlocksFocus(false);
+            toolbar.setKeyboardNavigationCluster(false);
+            toolbar.setTitleTextColor(isDarkMode ? Color.WHITE : Color.BLACK);
+            if (toolbar.getOverflowIcon() != null) {
+                Drawable overflow = toolbar.getOverflowIcon().mutate();
+                overflow.setTint(accentColor);
+                toolbar.setOverflowIcon(overflow);
+            }
+        }
+
+        applyDrawerStyling(navigationView);
+
+        // Create Winlator folder if not present
+        File winlatorDir = new File(SettingsFragment.DEFAULT_WINLATOR_PATH);
+        if (!winlatorDir.exists())
+            winlatorDir.mkdirs();
+
+        if (containerManager == null) containerManager = new ContainerManager(this);
+
+        Intent intent = getIntent();
+        editInputControls = intent.getBooleanExtra("edit_input_controls", false);
+        if (editInputControls) {
+            selectedProfileId = intent.getIntExtra("selected_profile_id", 0);
+            setActionBarHomeIcon(R.drawable.icon_action_bar_back);
+            onNavigationItemSelected(navigationView.getMenu().findItem(R.id.main_menu_input_controls));
+            navigationView.setCheckedItem(R.id.main_menu_input_controls);
+        } else {
+            int selectedMenuItemId = savedInstanceState != null
+                    ? savedInstanceState.getInt(STATE_SELECTED_MENU_ITEM_ID, 0)
+                    : intent.getIntExtra("selected_menu_item_id", 0);
+            boolean launchShortcutsByDefault = PreferenceManager.getDefaultSharedPreferences(this)
+                    .getBoolean(SettingsFragment.PREF_LAUNCH_SHORTCUTS_ON_DEFAULT, false);
+            int defaultMenuItemId = launchShortcutsByDefault ? R.id.main_menu_shortcuts : R.id.main_menu_home;
+            int menuItemId = selectedMenuItemId > 0 ? selectedMenuItemId : defaultMenuItemId;
+            boolean showStartupAnimation = savedInstanceState == null
+                    && (menuItemId == R.id.main_menu_home || menuItemId == R.id.main_menu_shortcuts)
+                    && PreferenceManager.getDefaultSharedPreferences(this)
+                            .getBoolean(SettingsFragment.PREF_STARTUP_ANIMATION_ENABLED, true);
+
+            if (showStartupAnimation) {
+                View startupOverlay = findViewById(R.id.StartupLoadingOverlay);
+                if (startupOverlay != null) {
+                    startupOverlay.setAlpha(1f);
+                    startupOverlay.setVisibility(View.VISIBLE);
+                    startupOverlay.bringToFront();
+                    startupLoadingVisible = true;
+                }
+            }
+
+            setActionBarHomeIcon(R.drawable.icon_action_bar_back);
+            onNavigationItemSelected(navigationView.getMenu().findItem(menuItemId));
+            navigationView.setCheckedItem(menuItemId);
+
+            if (checkStoragePermissions()) {
+                if (!ImageFsInstaller.installIfNeeded(this)) {
+                    com.winlator.cmod.contents.WineDownloader.checkFirstLaunchWineSetup(this);
+                }
+            } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    showAllFilesAccessDialog();
+                } else {
+                    ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE}, PERMISSION_WRITE_EXTERNAL_STORAGE_REQUEST_CODE);
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 0);
+                }
+            }
+        }
+    }
+
+    private void showAllFilesAccessDialog() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            new AlertDialog.Builder(this)
+                    .setTitle("All Files Access Required")
+                    .setMessage("In order to grant access to additional storage devices such as USB storage device, the All Files Access permission must be granted. Press Okay to grant All Files Access in your Android Settings.")
+                    .setPositiveButton("Okay", (dialog, which) -> {
+                        try {
+                            Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                            intent.setData(Uri.parse("package:" + getPackageName()));
+                            startActivity(intent);
+                        } catch (Exception e) {
+                            Intent intent = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                            startActivity(intent);
+                        }
+                    })
+                    .setNegativeButton("Later", (dialog, which) -> {
+                        if (!ImageFsInstaller.installIfNeeded(this)) {
+                            com.winlator.cmod.contents.WineDownloader.checkFirstLaunchWineSetup(this);
+                        }
+                    })
+                    .show();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == PERMISSION_WRITE_EXTERNAL_STORAGE_REQUEST_CODE) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                if (!ImageFsInstaller.installIfNeeded(this)) {
+                    com.winlator.cmod.contents.WineDownloader.checkFirstLaunchWineSetup(this);
+                }
+            } else {
+                AppUtils.showToast(this, "Storage permission is recommended for container drives.");
+                if (!ImageFsInstaller.installIfNeeded(this)) {
+                    com.winlator.cmod.contents.WineDownloader.checkFirstLaunchWineSetup(this);
+                }
+            }
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        applyConfiguredOrientation();
+        AppUtils.hideSystemUI(this);
+        SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(this);
+        if (preferences.getBoolean(PREF_RETURN_TO_SHORTCUTS_AFTER_GAME, false)) {
+            preferences.edit().remove(PREF_RETURN_TO_SHORTCUTS_AFTER_GAME).apply();
+            NavigationView navigationView = findViewById(R.id.NavigationView);
+            MenuItem shortcutsItem = navigationView != null
+                    ? navigationView.getMenu().findItem(R.id.main_menu_shortcuts)
+                    : null;
+            Fragment currentFragment = getSupportFragmentManager().findFragmentById(R.id.FLFragmentContainer);
+            if (shortcutsItem != null && !(currentFragment instanceof ShortcutsFragment)) {
+                onNavigationItemSelected(shortcutsItem);
+            }
+        }
+        if (checkStoragePermissions()) {
+            if (!ImageFsInstaller.installIfNeeded(this)) {
+                com.winlator.cmod.contents.WineDownloader.checkFirstLaunchWineSetup(this);
+            }
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) AppUtils.hideSystemUI(this);
+    }
+
+    @Override
+    protected void onSaveInstanceState(@NonNull Bundle outState) {
+        NavigationView navigationView = findViewById(R.id.NavigationView);
+        MenuItem checkedItem = navigationView != null ? navigationView.getCheckedItem() : null;
+        if (checkedItem != null) outState.putInt(STATE_SELECTED_MENU_ITEM_ID, checkedItem.getItemId());
+        super.onSaveInstanceState(outState);
+    }
+
+    // Main sections L1/R1 cycle through, in drawer order (About is a dialog, not a section).
+    private static final int[] CONTROLLER_SECTIONS = {
+        R.id.main_menu_shortcuts, R.id.main_menu_containers, R.id.main_menu_input_controls,
+        R.id.main_menu_contents, R.id.main_menu_community_configs, R.id.main_menu_file_manager,
+        R.id.main_menu_manage_graphics_drivers, R.id.main_menu_adrenotools_gpu_drivers, R.id.main_menu_settings
+    };
+
+    @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        boolean up = event.getAction() == android.view.KeyEvent.ACTION_UP;
+        switch (event.getKeyCode()) {
+            case android.view.KeyEvent.KEYCODE_BUTTON_START:
+                if (up) toggleDrawerForController();
+                return true;
+            case android.view.KeyEvent.KEYCODE_BUTTON_SELECT: {
+                if (up) {
+                    androidx.appcompat.widget.Toolbar toolbar = findViewById(R.id.Toolbar);
+                    if (toolbar != null && !toolbar.showOverflowMenu()) toggleToolbarFocus();
+                }
+                return true;
+            }
+            case android.view.KeyEvent.KEYCODE_BUTTON_Y:
+                if (up) {
+                    Fragment currentFragment = getSupportFragmentManager().findFragmentById(R.id.FLFragmentContainer);
+                    if (!(currentFragment instanceof ShortcutsFragment)
+                            || !((ShortcutsFragment) currentFragment).openSelectedShortcutMenu()) {
+                        toggleToolbarFocus();
+                    }
+                }
+                return true;
+            case android.view.KeyEvent.KEYCODE_BUTTON_L1:
+                if (up) switchSectionForController(-1);
+                return true;
+            case android.view.KeyEvent.KEYCODE_BUTTON_R1:
+                if (up) switchSectionForController(1);
+                return true;
+        }
+        return com.winlator.cmod.core.ControllerNavigation.dispatch(event, getWindow(), super::dispatchKeyEvent);
+    }
+
+    private void toggleDrawerForController() {
+        if (drawerLayout == null) return;
+        if (drawerLayout.isDrawerOpen(GravityCompat.START)) {
+            drawerLayout.closeDrawer(GravityCompat.START);
+            return;
+        }
+        drawerLayout.openDrawer(GravityCompat.START);
+        NavigationView navigationView = findViewById(R.id.NavigationView);
+        if (navigationView != null) navigationView.post(() -> focusDrawerItem(navigationView));
+    }
+
+    // Focus a real row (the current section) rather than the drawer's list, so the highlight shows at once.
+    @android.annotation.SuppressLint("RestrictedApi")
+    private void focusDrawerItem(NavigationView navigationView) {
+        if (!(navigationView.getChildAt(0) instanceof android.view.ViewGroup)) return;
+        android.view.ViewGroup list = (android.view.ViewGroup) navigationView.getChildAt(0);
+        View first = null;
+        for (int i = 0; i < list.getChildCount(); i++) {
+            View child = list.getChildAt(i);
+            if (!(child instanceof com.google.android.material.internal.NavigationMenuItemView)) continue;
+            if (first == null) first = child;
+            androidx.appcompat.view.menu.MenuItemImpl item = ((com.google.android.material.internal.NavigationMenuItemView) child).getItemData();
+            if (item != null && item.isChecked()) {
+                child.requestFocusFromTouch();
+                return;
+            }
+        }
+        if (first != null) first.requestFocusFromTouch();
+    }
+
+    // Y: jump between the toolbar (hamburger, + and other actions) and the screen content.
+    private void toggleToolbarFocus() {
+        androidx.appcompat.widget.Toolbar toolbar = findViewById(R.id.Toolbar);
+        if (toolbar == null) return;
+        View focused = getCurrentFocus();
+        boolean inToolbar = false;
+        for (View v = focused; v != null; v = v.getParent() instanceof View ? (View) v.getParent() : null) {
+            if (v == toolbar) {
+                inToolbar = true;
+                break;
+            }
+        }
+        if (inToolbar) {
+            View content = findViewById(R.id.FLFragmentContainer);
+            View target = content != null ? content.focusSearch(View.FOCUS_DOWN) : null;
+            if (content != null && !content.requestFocus(View.FOCUS_DOWN) && target != null) target.requestFocus();
+            return;
+        }
+        for (int i = 0; i < toolbar.getChildCount(); i++) {
+            View child = toolbar.getChildAt(i);
+            if (child instanceof android.widget.ImageButton && child.isShown()) {
+                child.requestFocusFromTouch();
+                return;
+            }
+        }
+        toolbar.requestFocusFromTouch();
+    }
+
+    private void switchSectionForController(int direction) {
+        // Not while a sub-screen (e.g. the save folder picker) is stacked on top, or the editor flow is open.
+        if (editInputControls || getSupportFragmentManager().getBackStackEntryCount() > 0) return;
+        NavigationView navigationView = findViewById(R.id.NavigationView);
+        if (navigationView == null) return;
+
+        MenuItem checked = navigationView.getCheckedItem();
+        int current = -1;
+        for (int i = 0; i < CONTROLLER_SECTIONS.length; i++) {
+            if (checked != null && checked.getItemId() == CONTROLLER_SECTIONS[i]) current = i;
+        }
+        if (current < 0) current = direction > 0 ? -1 : 0;
+
+        int count = CONTROLLER_SECTIONS.length;
+        for (int step = 1; step <= count; step++) {
+            int index = ((current + direction * step) % count + count) % count;
+            MenuItem item = navigationView.getMenu().findItem(CONTROLLER_SECTIONS[index]);
+            if (item != null && item.isVisible()) {
+                navigationView.setCheckedItem(item);
+                onNavigationItemSelected(item);
+                return;
+            }
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        FragmentManager fragmentManager = getSupportFragmentManager();
+        Fragment currentFragment = fragmentManager.findFragmentById(R.id.FLFragmentContainer);
+
+        if (currentFragment instanceof FileManagerFragment && getOnBackPressedDispatcher().hasEnabledCallbacks()) {
+            super.onBackPressed();
+            return;
+        }
+
+        if (editInputControls) {
+            super.onBackPressed();
+            return;
+        }
+        if (currentFragment instanceof ConsoleHomeFragment) {
+            finish();
+            return;
+        }
+        NavigationView navigationView = findViewById(R.id.NavigationView);
+        if (navigationView != null) {
+            MenuItem homeItem = navigationView.getMenu().findItem(R.id.main_menu_home);
+            if (homeItem != null) navigationView.setCheckedItem(homeItem);
+        }
+        show(new ConsoleHomeFragment(), true);
+    }
+
+    public void applyConfiguredOrientation() {
+        String orientation = PreferenceManager.getDefaultSharedPreferences(this)
+                .getString(SettingsFragment.PREF_APP_ORIENTATION, "auto");
+        int requestedOrientation;
+        if ("vertical".equals(orientation)) {
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
+        } else if ("horizontal".equals(orientation)) {
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE;
+        } else {
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR;
+        }
+        if (getRequestedOrientation() != requestedOrientation) {
+            setRequestedOrientation(requestedOrientation);
+        }
+    }
+
+    public void openHome() {
+        NavigationView navigationView = findViewById(R.id.NavigationView);
+        MenuItem homeItem = navigationView != null
+                ? navigationView.getMenu().findItem(R.id.main_menu_home)
+                : null;
+        if (homeItem != null) {
+            onNavigationItemSelected(homeItem);
+        } else {
+            show(new ConsoleHomeFragment(), false);
+        }
+    }
+
+    private boolean checkStoragePermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return Environment.isExternalStorageManager();
+        } else {
+            return ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+        }
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem menuItem) {
+        if (menuItem.getItemId() == android.R.id.home) {
+            onBackPressed();
+            return true;
+        } else {
+            return super.onOptionsItemSelected(menuItem);
+        }
+    }
+
+    public void setActionBarHomeIcon(int resId) {
+        ActionBar actionBar = getSupportActionBar();
+        if (actionBar != null) {
+            Drawable icon = ContextCompat.getDrawable(this, resId);
+            if (icon != null) {
+                icon = icon.mutate();
+                icon.setTint(Color.WHITE);
+                actionBar.setHomeAsUpIndicator(icon);
+            } else {
+                actionBar.setHomeAsUpIndicator(resId);
+            }
+        }
+    }
+
+    @Override
+    public boolean onPrepareOptionsMenu(Menu menu) {
+        for (int i = 0; i < menu.size(); i++) {
+            MenuItem item = menu.getItem(i);
+            if (item.getIcon() != null) {
+                Drawable icon = item.getIcon().mutate();
+                icon.setTint(Color.WHITE);
+                item.setIcon(icon);
+            }
+        }
+        return super.onPrepareOptionsMenu(menu);
+    }
+
+    public void toggleDrawer() {
+        if (drawerLayout.isDrawerOpen(GravityCompat.START)) {
+            drawerLayout.closeDrawer(GravityCompat.START);
+        } else {
+            drawerLayout.openDrawer(GravityCompat.START);
+        }
+    }
+
+    @Override
+    public boolean onNavigationItemSelected(@NonNull MenuItem item) {
+        FragmentManager fragmentManager = getSupportFragmentManager();
+        if (fragmentManager.getBackStackEntryCount() > 0) {
+            fragmentManager.popBackStack(null, FragmentManager.POP_BACK_STACK_INCLUSIVE);
+        }
+
+        switch (item.getItemId()) {
+            case R.id.main_menu_home:
+                show(new ConsoleHomeFragment(), false);
+                break;
+            case R.id.main_menu_shortcuts:
+                show(new ShortcutsFragment(), false);  // Forward animation
+                break;
+            case R.id.main_menu_containers:
+                show(new ContainersFragment(), false);  // Forward animation
+                break;
+            case R.id.main_menu_input_controls:
+                show(new InputControlsFragment(selectedProfileId), false);  // Forward animation
+                break;
+            case R.id.main_menu_contents:
+                show(new ContentsFragment(), false);  // Forward animation
+                break;
+            case R.id.main_menu_community_configs:
+                show(new CommunityConfigsFragment(), false);  // Forward animation
+                break;
+            case R.id.main_menu_file_manager:
+                show(new FileManagerFragment(), false);
+                break;
+            case R.id.main_menu_manage_graphics_drivers:
+                show(new ManageGraphicsDriversFragment(), false);
+                break;
+            case R.id.main_menu_adrenotools_gpu_drivers:
+                show(new AdrenotoolsFragment(), false);
+                break;
+            case R.id.main_menu_settings:
+                show(new SettingsFragment(), false);  // Forward animation
+                break;
+            case R.id.main_menu_about:
+                showAboutDialog();
+                break;
+        }
+
+        if (item.getItemId() != R.id.main_menu_about) {
+            NavigationView navigationView = findViewById(R.id.NavigationView);
+            if (navigationView != null) {
+                navigationView.setCheckedItem(item.getItemId());
+            }
+        }
+        return true;
+    }
+
+
+//    private void show(Fragment fragment) {
+//        FragmentManager fragmentManager = getSupportFragmentManager();
+//        fragmentManager.beginTransaction()
+//                .replace(R.id.FLFragmentContainer, fragment)
+//                .commit();
+//
+//        drawerLayout.closeDrawer(GravityCompat.START);
+//    }
+
+    private void show(Fragment fragment, boolean reverse) {
+        Integer sectionColor = getSectionGradientColor(fragment);
+        applySectionChrome(sectionColor);
+        setConsoleChrome(fragment instanceof ConsoleHomeFragment,
+                fragment instanceof SettingsFragment || fragment instanceof ShortcutsFragment);
+        FragmentManager fragmentManager = getSupportFragmentManager();
+        if (reverse) {
+            fragmentManager.beginTransaction()
+                    .setCustomAnimations(R.anim.console_section_enter_reverse, R.anim.console_section_exit_reverse)
+                    .replace(R.id.FLFragmentContainer, fragment)
+                    .commit();
+        } else {
+            fragmentManager.beginTransaction()
+                    .setCustomAnimations(R.anim.console_section_enter, R.anim.console_section_exit)
+                    .replace(R.id.FLFragmentContainer, fragment)
+                    .commit();
+        }
+
+        drawerLayout.closeDrawer(GravityCompat.START);
+    }
+
+    private void setConsoleChrome(boolean consoleHome, boolean fullScreenScreen) {
+        androidx.appcompat.widget.Toolbar toolbar = findViewById(R.id.Toolbar);
+        if (toolbar != null) toolbar.setVisibility(consoleHome || fullScreenScreen ? View.GONE : View.VISIBLE);
+    }
+
+    private void applySectionChrome(@Nullable Integer color) {
+        int accent = color != null ? color : 0;
+        ThemeManager.setSectionAccentColor(accent);
+
+        androidx.appcompat.widget.Toolbar toolbar = findViewById(R.id.Toolbar);
+        if (toolbar != null && color != null) {
+            toolbar.setBackground(ConsoleHomeFragment.createBackground(color));
+            if (toolbar.getOverflowIcon() != null) {
+                Drawable overflow = toolbar.getOverflowIcon().mutate();
+                overflow.setTint(Color.WHITE);
+                toolbar.setOverflowIcon(overflow);
+            }
+        }
+
+        if (color != null) {
+            setActionBarHomeIcon(R.drawable.icon_action_bar_back);
+        }
+    }
+
+    private void registerSectionGradientCallbacks() {
+        getSupportFragmentManager().registerFragmentLifecycleCallbacks(
+                new FragmentManager.FragmentLifecycleCallbacks() {
+                    @Override
+                    public void onFragmentViewCreated(@NonNull FragmentManager fragmentManager,
+                                                      @NonNull Fragment fragment,
+                                                      @NonNull View view,
+                                                      @Nullable Bundle savedInstanceState) {
+                        Integer color = getSectionGradientColor(fragment);
+                        if (color != null) {
+                            ThemeManager.applyThemeToView(view, MainActivity.this);
+                            applySectionGradient(view, color);
+                        }
+                    }
+                }, true);
+    }
+
+    @Nullable
+    private Integer getSectionGradientColor(Fragment fragment) {
+        if (fragment instanceof ContainersFragment || fragment instanceof ContainerDetailFragment) {
+            return ConsoleHomeFragment.CONTAINERS_BACKGROUND_COLOR;
+        }
+        if (fragment instanceof InputControlsFragment) return ConsoleHomeFragment.INPUT_BACKGROUND_COLOR;
+        if (fragment instanceof ContentsFragment) return ConsoleHomeFragment.CONTENTS_BACKGROUND_COLOR;
+        if (fragment instanceof CommunityConfigsFragment) return ConsoleHomeFragment.COMMUNITY_BACKGROUND_COLOR;
+        if (fragment instanceof FileManagerFragment) return ConsoleHomeFragment.FILE_MANAGER_BACKGROUND_COLOR;
+        if (fragment instanceof ManageGraphicsDriversFragment) return ConsoleHomeFragment.WRAPPERS_BACKGROUND_COLOR;
+        if (fragment instanceof AdrenotoolsFragment) return ConsoleHomeFragment.PANVK_BACKGROUND_COLOR;
+        if (fragment instanceof SettingsFragment) return ConsoleHomeFragment.SETTINGS_BACKGROUND_COLOR;
+        return null;
+    }
+
+    private void applySectionGradient(View view, int color) {
+        if ("sectionGradient".equals(view.getTag())) {
+            view.setBackground(ConsoleHomeFragment.createBackground(color));
+        } else if ("sectionToolbar".equals(view.getTag())) {
+            view.setBackground(ConsoleHomeFragment.createBackground(color));
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                applySectionGradient(group.getChildAt(i), color);
+            }
+        }
+    }
+
+    @Override
+    public boolean onMenuOpened(int featureId, Menu menu) {
+        UiSoundEffects.playMenuOpened();
+        return super.onMenuOpened(featureId, menu);
+    }
+
+    @Override
+    public void onPanelClosed(int featureId, Menu menu) {
+        UiSoundEffects.playMenuClosed();
+        super.onPanelClosed(featureId, menu);
+    }
+
+    public void openNavigationItem(int itemId) {
+        NavigationView navigationView = findViewById(R.id.NavigationView);
+        MenuItem item = navigationView != null ? navigationView.getMenu().findItem(itemId) : null;
+        if (item == null || !item.isVisible()) return;
+        onNavigationItemSelected(item);
+    }
+
+    public void preserveShortcutsOnGameReturn() {
+        PreferenceManager.getDefaultSharedPreferences(this).edit()
+                .putBoolean(PREF_RETURN_TO_SHORTCUTS_AFTER_GAME, true)
+                .apply();
+    }
+
+    public boolean scheduleStartupHomeEntrance(Runnable startEntrance) {
+        if (!startupLoadingVisible) return false;
+        startupEntranceCallback = startEntrance;
+        if (startupEntranceScheduled) return true;
+        startupEntranceScheduled = true;
+
+        View startupOverlay = findViewById(R.id.StartupLoadingOverlay);
+        if (startupOverlay == null) {
+            startupLoadingVisible = false;
+            return false;
+        }
+
+        startupOverlay.bringToFront();
+        UiSoundEffects.playLaunch(this);
+        startupOverlay.postDelayed(() -> {
+            if (isFinishing() || !startupLoadingVisible) return;
+            startupLoadingVisible = false;
+            startupOverlay.animate()
+                    .alpha(0f)
+                    .setDuration(260)
+                    .withEndAction(() -> {
+                        startupOverlay.setVisibility(View.GONE);
+                        Runnable entranceCallback = startupEntranceCallback;
+                        startupEntranceCallback = null;
+                        if (entranceCallback != null) entranceCallback.run();
+                    })
+                    .start();
+        }, 3100L);
+        return true;
+    }
+
+    public boolean isStartupAnimationEnabled() {
+        return PreferenceManager.getDefaultSharedPreferences(this)
+                .getBoolean(SettingsFragment.PREF_STARTUP_ANIMATION_ENABLED, true);
+    }
+
+    public boolean isStartupLoadingVisible() {
+        return startupLoadingVisible;
+    }
+
+    private void showAboutDialog() {
+        ContentDialog dialog = new ContentDialog(this, R.layout.about_dialog);
+        dialog.findViewById(R.id.LLBottomBar).setVisibility(View.GONE);
+
+        if (isDarkMode) {
+            dialog.getWindow().setBackgroundDrawableResource(R.drawable.content_dialog_background_dark);
+        } else {
+            dialog.getWindow().setBackgroundDrawableResource(R.drawable.content_dialog_background);
+        }
+
+        try {
+            final PackageInfo pInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
+
+            TextView tvWebpage = dialog.findViewById(R.id.TVWebpage);
+            tvWebpage.setText(Html.fromHtml("<a href=\"https://github.com/GunaCharanTeja/WinlatorMali\">github.com/GunaCharanTeja/WinlatorMali</a>", Html.FROM_HTML_MODE_LEGACY));
+            tvWebpage.setMovementMethod(LinkMovementMethod.getInstance());
+
+            ((TextView) dialog.findViewById(R.id.TVAppVersion)).setText(getString(R.string.version) + " " + pInfo.versionName);
+
+            String branchFeaturesHTML = String.join("<br />",
+                    "<b>• Selectable Display Renderers:</b> OpenGL + Gladio, EGL, Vulkan, and SurfaceFlinger can be selected per container or shortcut. This host renderer choice is separate from the guest Vulkan graphics wrapper.",
+                    "<b>• Selectable Touch Controls Engines:</b> Winlator 1.2.1 is the default, with Winlator 1.1 and Bannerlator 3.1.8 engines available.",
+                    "<b>• BCn Texture Emulation &amp; Disk Cache:</b> Hardware-accelerated Vulkan BCn layer with ASTC/ETC2 transcode, Native Direct toggle, and persistent disk caching for Mali GPUs.",
+                    "<b>• ZeroFG Frame Generation:</b> Custom Mali-optimized frame interpolation engine for higher perceived framerates.",
+                    "<b>• Winlator Telemetry HUD:</b> Direct Mali GPU load and clock telemetry via sysfs, real CPU usage, thermal status, battery watts, 1% and 0.1% lows, frame-time graph, and Madeira Glass styling.",
+                    "<b>• USB Gamepad &amp; Vibration:</b> True USB controller attachment, auto-grant permission persistence, rumble feedback, and full D-Pad/controller UI navigation.",
+                    "<b>• Community Configs &amp; Ratings:</b> Cloud config sync, automated Mali/Adreno badges, unbundled Wine downloader flow, and real-time community Helpful / Didn't Work ratings.",
+                    "<b>• Save Manager &amp; Hero Art:</b> 16:9 SteamGridDB hero art, fullscreen launch screens, and automatic save detection &amp; restoration for standard and cracked games."
+            );
+            TextView tvBranchFeatures = dialog.findViewById(R.id.TVBranchFeatures);
+            if (tvBranchFeatures != null) {
+                tvBranchFeatures.setText(Html.fromHtml(branchFeaturesHTML, Html.FROM_HTML_MODE_LEGACY));
+            }
+
+            String creditsHTML = String.join("<br />",
+                    "<b>RE:winmali fork maker</b>: Gustave",
+                    "Original <b>Winlator Mali</b> project by <a href=\"https://github.com/GunaCharanTeja\">GunaCharanTeja (Fcharan)</a>",
+                    "<b>The412Banner</b>: Vulkan and SurfaceFlinger renderer integrations, and the Bannerlator 3.1.8 touch-controls engine",
+                    "<b>Bannerlator 3.1.8</b> by <a href=\"https://github.com/The412Banner/Bannerlator\">The412Banner</a> — selected integration references",
+                    "<b>Winlator &amp; Gladio</b> by <a href=\"https://github.com/brunodev85\">Bruno (brunodev85)</a>",
+                    "Fork of <b>Winlator Bionic</b> by <a href=\"https://github.com/Pipetto-crypto\">Pipetto Cripto</a>",
+                    "<b>BCN Layer &amp; Transcode</b> by <a href=\"https://github.com/leegao\">leegao</a>",
+                    "Winlator HUD &amp; File Manager from <b>Winlator Ludashi</b> by <a href=\"https://github.com/StevenMXZ\">stevenmxz</a>",
+                    "Controller fixes &amp; Navigation by <a href=\"https://github.com/Vivsi1\">vivsi1</a>",
+                    "Theme system &amp; CI contributions by <a href=\"https://github.com/Noysz\">Noysz</a>",
+                    "Original Community Configs Concept by <a href=\"https://github.com/The412Banner\">The412Banner</a>",
+                    "GLIBC Fork contributions by <a href=\"https://github.com/longjunyu2\">longjunyu2</a>"
+            );
+            TextView tvCredits = dialog.findViewById(R.id.TVCreditsAndThirdPartyApps);
+            if (tvCredits != null) {
+                tvCredits.setText(Html.fromHtml(creditsHTML, Html.FROM_HTML_MODE_LEGACY));
+                tvCredits.setMovementMethod(LinkMovementMethod.getInstance());
+            }
+
+            String licensesHTML = String.join("<br />",
+                    "<b>Wine / Proton:</b> LGPL v2.1+ (<a href=\"https://www.winehq.org\">winehq.org</a>)",
+                    "<b>Box64 &amp; FEX-Emu:</b> MIT (<a href=\"https://github.com/ptitSeb/box64\">ptitSeb</a> / <a href=\"https://github.com/FEX-Emu/FEX\">FEX-Emu</a>)",
+                    "<b>Mesa (Turnip / Zink / Wrapper):</b> MIT / LGPL (<a href=\"https://github.com/xMeM/mesa\">xMeM</a>)",
+                    "<b>DXVK &amp; VKD3D:</b> zlib / LGPL v2.1 (<a href=\"https://github.com/doitsujin/dxvk\">doitsujin</a> / <a href=\"https://gitlab.winehq.org/wine/vkd3d\">WineHQ</a>)",
+                    "<b>D8VK &amp; dxwrapper &amp; CNC DDraw:</b> zlib / GPL / MIT",
+                    "<b>libadrenotools:</b> GPL v3 (<a href=\"https://github.com/bylaws/libadrenotools\">bylaws</a>)",
+                    "<b>ZeroFG Frame Generation:</b> Apache 2.0 / BSD 3-Clause",
+                    "<b>Inter Font:</b> SIL Open Font License 1.1",
+                    "<b>Android Open Source Project:</b> Apache 2.0"
+            );
+            TextView tvLicenses = dialog.findViewById(R.id.TVLicenses);
+            if (tvLicenses != null) {
+                tvLicenses.setText(Html.fromHtml(licensesHTML, Html.FROM_HTML_MODE_LEGACY));
+                tvLicenses.setMovementMethod(LinkMovementMethod.getInstance());
+            }
+        } catch (PackageManager.NameNotFoundException e) {
+            e.printStackTrace();
+        }
+
+        dialog.show();
+    }
+
+    private void applyDrawerStyling(NavigationView navigationView) {
+        int accentColor = ThemeManager.getAccentColor(this);
+        int onSurfaceColor = ThemeManager.getOnSurfaceTextColor(this);
+        int surfaceColor = ThemeManager.getSurfaceColor(this);
+
+        navigationView.setBackgroundColor(surfaceColor);
+
+        int[][] states = new int[][]{
+            new int[]{android.R.attr.state_checked},
+            new int[]{android.R.attr.state_pressed},
+            new int[]{}
+        };
+        // The selected item reads brighter than the rest: its text is the accent lifted towards the normal text color
+        // (plain accent on an accent pill was darker than the unselected items), its icon the full accent.
+        int checkedIcon = androidx.core.graphics.ColorUtils.blendARGB(accentColor, onSurfaceColor, 0.35f);
+        int normalText = (onSurfaceColor & 0x00FFFFFF) | (0xD9 << 24);
+        android.content.res.ColorStateList textStateList = new android.content.res.ColorStateList(states,
+            new int[]{onSurfaceColor, onSurfaceColor, normalText});
+        android.content.res.ColorStateList iconStateList = new android.content.res.ColorStateList(states,
+            new int[]{checkedIcon, checkedIcon, (onSurfaceColor & 0x00FFFFFF) | (0xA8 << 24)});
+        navigationView.setItemTextColor(textStateList);
+        navigationView.setItemIconTintList(iconStateList);
+
+        // Section titles and dividers: Material 1.4 draws them from the theme's fixed colors (white), which vanish on a
+        // light custom palette. They are recolored from the preset's readable text and divider colors on every layout.
+        int subheaderColor = (onSurfaceColor & 0x00FFFFFF) | (0xA6 << 24);
+        int dividerColor = ThemeManager.getDividerColor(this);
+        View menuList = navigationView.getChildAt(0);
+        if (menuList instanceof ViewGroup) {
+            ViewGroup list = (ViewGroup) menuList;
+            list.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+                for (int i = 0; i < list.getChildCount(); i++) {
+                    View child = list.getChildAt(i);
+                    if (child instanceof TextView) ((TextView) child).setTextColor(subheaderColor);
+                    else if (child instanceof ViewGroup && child.getClass().getSimpleName().contains("Separator")) {
+                        View line = ((ViewGroup) child).getChildCount() > 0 ? ((ViewGroup) child).getChildAt(0) : null;
+                        if (line != null) line.setBackgroundColor(dividerColor);
+                    }
+                }
+            });
+        }
+
+        // The app version under the title.
+        View header = navigationView.getHeaderCount() > 0 ? navigationView.getHeaderView(0) : null;
+        // Header text follows the preset's readable text color (a custom palette can have a light background).
+        TextView tvTitle = header != null ? header.findViewById(R.id.TVHeaderTitle) : null;
+        if (tvTitle != null) tvTitle.setTextColor(onSurfaceColor);
+        TextView tvVersion = header != null ? header.findViewById(R.id.TVHeaderVersion) : null;
+        if (tvVersion != null) tvVersion.setTextColor(onSurfaceColor);
+        if (tvVersion != null) {
+            try {
+                tvVersion.setText("v" + getPackageManager().getPackageInfo(getPackageName(), 0).versionName);
+                tvVersion.setVisibility(View.VISIBLE);
+            } catch (PackageManager.NameNotFoundException ignored) {}
+        }
+
+        // Dynamic theme accent pill highlight
+        int pillAlpha = 0x55; // ~33% alpha
+        int pillColor = (accentColor & 0x00FFFFFF) | (pillAlpha << 24);
+        int rippleColor = (accentColor & 0x00FFFFFF) | (0x33 << 24);
+
+        android.graphics.drawable.GradientDrawable checkedDrawable = new android.graphics.drawable.GradientDrawable();
+        checkedDrawable.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+        checkedDrawable.setCornerRadius(dpToPx(24));
+        checkedDrawable.setColor(pillColor);
+
+        android.graphics.drawable.GradientDrawable transparentDrawable = new android.graphics.drawable.GradientDrawable();
+        transparentDrawable.setColor(android.graphics.Color.TRANSPARENT);
+
+        android.graphics.drawable.StateListDrawable stateListDrawable = new android.graphics.drawable.StateListDrawable();
+        stateListDrawable.addState(new int[]{android.R.attr.state_checked}, checkedDrawable);
+        stateListDrawable.addState(new int[]{}, transparentDrawable);
+
+        // The pill (and its ripple) floats inside the drawer: a custom item background ignores itemShapeInset*.
+        android.graphics.drawable.GradientDrawable rippleMask = new android.graphics.drawable.GradientDrawable();
+        rippleMask.setCornerRadius(dpToPx(24));
+        rippleMask.setColor(Color.WHITE);
+        android.graphics.drawable.RippleDrawable rippleDrawable = new android.graphics.drawable.RippleDrawable(
+            android.content.res.ColorStateList.valueOf(rippleColor),
+            stateListDrawable,
+            rippleMask
+        );
+        int insetH = (int) dpToPx(12), insetV = (int) dpToPx(2);
+        navigationView.setItemBackground(new android.graphics.drawable.InsetDrawable(rippleDrawable, insetH, insetV, insetH, insetV));
+    }
+
+    private float dpToPx(float dp) {
+        return dp * getResources().getDisplayMetrics().density;
+    }
+
+    public ContainerManager getContainerManager() {
+        // Fragments restored after process death call this from super.onCreate(), before onCreate assigns it.
+        if (containerManager == null) containerManager = new ContainerManager(this);
+        return containerManager;
+    }
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == OPEN_IMAGE_REQUEST_CODE && resultCode == RESULT_OK && data != null) {
+            Bitmap bitmap = ImageUtils.getBitmapFromUri(this, data.getData(), 1280);
+            if (bitmap == null) return;
+            File userWallpaperFile = WineThemeManager.getUserWallpaperFile(this);
+            ImageUtils.save(bitmap, userWallpaperFile, Bitmap.CompressFormat.PNG, 100);
+        } else if (requestCode == com.winlator.cmod.saves.SaveManagerDialog.REQUEST_CODE_RESTORE_ZIP && resultCode == RESULT_OK && data != null) {
+            Uri uri = data.getData();
+            if (uri != null) {
+                com.winlator.cmod.saves.SaveManagerDialog dialog = com.winlator.cmod.saves.SaveManagerDialog.getActiveInstance();
+                if (dialog != null) {
+                    dialog.handlePickedUri(uri);
+                }
+            }
+        }
+    }
+}

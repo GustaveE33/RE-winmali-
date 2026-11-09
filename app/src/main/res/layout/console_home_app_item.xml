@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="108dp"
+    android:layout_margin="5dp"
+    android:clickable="true"
+    android:focusable="true"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:paddingStart="3dp"
+    android:paddingTop="4dp"
+    android:paddingEnd="3dp"
+    android:paddingBottom="4dp">
+
+    <ImageView
+        android:id="@+id/IVConsoleAppIcon"
+        android:layout_width="54dp"
+        android:layout_height="54dp"
+        android:contentDescription="@null"
+        android:scaleType="fitCenter"
+        android:tint="#FFFFFF" />
+
+    <TextView
+        android:id="@+id/TVConsoleAppTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="5dp"
+        android:ellipsize="end"
+        android:gravity="center"
+        android:maxLines="2"
+        android:textColor="#E4ECF8"
+        android:textSize="10sp"
+        android:textStyle="bold" />
+</LinearLayout>
