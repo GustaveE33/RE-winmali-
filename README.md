@@ -5,7 +5,7 @@ A fork of Winlator Mali
 
 # What's new? 
 
- ## New UI
+ ## 🎨New UI
 new horizontal and vertical UI 
 <img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/629fce2a-5c5c-49ad-9550-cc199d8d0034" />
 <img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/4b2626c6-ce37-4f86-b4ac-3177bc851350" />
@@ -18,20 +18,20 @@ new horizontal and vertical UI
 new shortcuts app UI with costomizable icons and backgrounds,vertical mode has two scrolling modes, vertical and horizontal mode have different art
 
 
-## New features 
+## 👀New features 
 
 ### Direct PANVK driver import 
 import your drivers easily 
 <img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/4a9d43d3-6c4c-441c-9c79-1e914e2f28bf" />
 
-### Import wrapper option 
+### 🫔Import wrapper option 
 import any .tzst wrapper natively from the mange wrappers app
 <img width="1280" height="562" alt="image" src="https://github.com/user-attachments/assets/ce8587e7-aee0-4b24-9866-c2a6a9fb0ba4" />
 
-### Change touch controls engine
-if you faced any problems with the touch or gamepad controls you can change the engine to the winlator mali 1.1 engine as a fallback
+### 🚂Change touch controls engine
+if you faced any problems with the touch or gamepad controls you can change the engine to the winlator mali 1.1 or the Bannerlator-3.1.8 engine as a fallback
 
-### New renderers 
+### 👨‍💻New renderers 
   #### OpenGL+Gladio 
   from winlator mali 1.2 beta
 
@@ -69,7 +69,7 @@ Community Configs idea: The412Banner
 Reference implementations: longjunyu2
 ZeroFG: hy300leosquizz-ctrl
 Touch controls styling: inspired by Madeira
-
+Vulakn and SurfaceFilnger and the bannerlator touch engine by The412Banner
 # Licenses
 Wine/Proton (LGPL v2.1+), Box64 (MIT), FEX-Emu (MIT), Mesa (MIT/LGPL), DXVK (zlib/libpng), VKD3D (LGPL v2.1), libadrenotools (GPL v3), ZeroFG (Apache 2.0 / BSD 3-Clause), Inter Font (SIL OFL 1.1), AOSP (Apache 2.0). 
   
