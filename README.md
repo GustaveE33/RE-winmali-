@@ -71,5 +71,21 @@ ZeroFG: hy300leosquizz-ctrl
 Touch controls styling: inspired by Madeira
 Vulakn and SurfaceFilnger and the bannerlator touch engine by The412Banner
 # Licenses
-Wine/Proton (LGPL v2.1+), Box64 (MIT), FEX-Emu (MIT), Mesa (MIT/LGPL), DXVK (zlib/libpng), VKD3D (LGPL v2.1), libadrenotools (GPL v3), ZeroFG (Apache 2.0 / BSD 3-Clause), Inter Font (SIL OFL 1.1), AOSP (Apache 2.0). 
+
+This repository's code and the Vulkan, SurfaceFlinger, and touch-engine contributions from Bannerlator are licensed under the GNU General Public License, version 3.0 (GPL-3.0), consistent with Bannerlator's license:
+
+> This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+See [LICENSE](LICENSE). Third-party components retain their respective licenses:
+
+- Wine/Proton: LGPL v2.1+
+- Box64: MIT
+- FEX-Emu: MIT
+- Mesa: MIT/LGPL
+- DXVK: zlib/libpng
+- VKD3D: LGPL v2.1
+- libadrenotools: GPL v3
+- ZeroFG: Apache 2.0 / BSD 3-Clause
+- Inter Font: SIL OFL 1.1
+- AOSP: Apache 2.0
   
